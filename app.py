@@ -1,69 +1,105 @@
-import os
+from datetime import datetime, timedelta, date
 from io import BytesIO
-from datetime import date, datetime, timedelta
+import os
+import uuid
 
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 from PIL import Image
+from supabase import create_client
 
 
 # =========================================================
-# Interior Flow v2 - 여러 현장 관리 버전
-# 실행 명령어: streamlit run app.py
-# 배포: Streamlit Community Cloud
+# Interior Flow v3 - Supabase DB + Storage 저장형
+# 실행: streamlit run app.py
+# 필요 패키지: streamlit, pandas, plotly, pillow, openpyxl, supabase
 # =========================================================
 
-APP_TITLE = "🏠 Interior Flow v2 - 인테리어 다현장 협업 대시보드"
-DATA_DIR = "data"
-PHOTO_DIR = os.path.join(DATA_DIR, "photos")
-PROJECTS_FILE = os.path.join(DATA_DIR, "projects.csv")
-TASKS_FILE = os.path.join(DATA_DIR, "tasks.csv")
-ISSUES_FILE = os.path.join(DATA_DIR, "issues.csv")
-CHANGE_ORDERS_FILE = os.path.join(DATA_DIR, "change_orders.csv")
-PHOTOS_FILE = os.path.join(DATA_DIR, "photos.csv")
+APP_TITLE = "🏠 Interior Flow v3 - Supabase 저장형 다현장 협업 대시보드"
+DEFAULT_BUCKET = "interior-photos"
 
-
-# -----------------------------
-# 기본 설정
-# -----------------------------
-st.set_page_config(page_title="Interior Flow v2", layout="wide")
+st.set_page_config(page_title="Interior Flow v3", layout="wide")
 st.title(APP_TITLE)
-st.caption("여러 인테리어 현장의 공정, 이슈, 추가공사, 사진 기록을 한 화면에서 관리하는 MVP입니다.")
+st.caption("여러 인테리어 현장의 공정, 이슈, 추가공사, 사진 기록을 Supabase DB와 Storage에 저장합니다.")
 
 
 # -----------------------------
-# 폴더 생성
+# Supabase 연결
 # -----------------------------
-def ensure_dirs() -> None:
-    os.makedirs(DATA_DIR, exist_ok=True)
-    os.makedirs(PHOTO_DIR, exist_ok=True)
+@st.cache_resource
+def get_supabase_client():
+    try:
+        url = st.secrets["SUPABASE_URL"]
+        key = st.secrets["SUPABASE_KEY"]
+        return create_client(url, key)
+    except Exception:
+        st.error("Supabase 연결 정보가 없습니다. Streamlit Secrets에 SUPABASE_URL, SUPABASE_KEY, SUPABASE_BUCKET을 등록해 주세요.")
+        st.stop()
+
+
+supabase = get_supabase_client()
+BUCKET = st.secrets.get("SUPABASE_BUCKET", DEFAULT_BUCKET)
 
 
 # -----------------------------
-# 기본 데이터 생성
+# Supabase 유틸
 # -----------------------------
-def create_default_projects() -> pd.DataFrame:
-    today = datetime.now().date()
-    return pd.DataFrame(
-        [
-            {
-                "프로젝트ID": 1,
-                "프로젝트명": "해운대 아파트 34평 리모델링",
-                "현장주소": "부산 해운대구 ○○동",
-                "고객명": "홍길동",
-                "계약금액": 50000000,
-                "공사시작일": str(today),
-                "예상공사기간": 45,
-                "상태": "진행중",
-                "PM": "박민서",
-                "메모": "기본 예시 현장",
-            }
-        ]
-    )
+def sb_select(table: str, order_col: str = "id") -> pd.DataFrame:
+    try:
+        res = supabase.table(table).select("*").order(order_col).execute()
+        return pd.DataFrame(res.data or [])
+    except Exception as e:
+        st.error(f"{table} 데이터를 불러오지 못했습니다: {e}")
+        return pd.DataFrame()
 
 
-def create_default_tasks(project_id: int, project_name: str, start_date: date) -> pd.DataFrame:
+def sb_insert(table: str, row: dict):
+    return supabase.table(table).insert(row).execute()
+
+
+def sb_update(table: str, row_id: int, values: dict):
+    return supabase.table(table).update(values).eq("id", row_id).execute()
+
+
+def sb_delete(table: str, row_id: int):
+    return supabase.table(table).delete().eq("id", row_id).execute()
+
+
+def to_int(value, default=0):
+    try:
+        if pd.isna(value):
+            return default
+        return int(value)
+    except Exception:
+        return default
+
+
+def to_date_str(value):
+    if value in [None, "", pd.NaT]:
+        return None
+    try:
+        return str(pd.to_datetime(value).date())
+    except Exception:
+        return None
+
+
+def safe_date(value, default=None):
+    if default is None:
+        default = datetime.now().date()
+    try:
+        parsed = pd.to_datetime(value, errors="coerce")
+        if pd.isna(parsed):
+            return default
+        return parsed.date()
+    except Exception:
+        return default
+
+
+# -----------------------------
+# 기본 공정표
+# -----------------------------
+def default_process_rows(project_id: int, start_date: date):
     processes = [
         ("철거", 0, 3, "김팀장"),
         ("전기/배선", 3, 8, "박기사"),
@@ -75,180 +111,216 @@ def create_default_tasks(project_id: int, project_name: str, start_date: date) -
         ("조명/기구", 34, 39, "송조명"),
         ("청소 및 검수", 39, 45, "관리자"),
     ]
-
     rows = []
-    base_id = int(project_id) * 1000
-    for idx, (process, start_offset, end_offset, manager) in enumerate(processes, start=1):
+    for idx, (process, start_offset, end_offset, manager) in enumerate(processes):
+        status = "대기"
+        progress = 0
+        actual_start = None
+        actual_end = None
+        next_action = ""
+        approval_required = "아니오"
+        approval_status = "해당없음"
+
+        if idx == 0:
+            status = "완료"
+            progress = 100
+            actual_start = str(start_date)
+            actual_end = str(start_date + timedelta(days=3))
+        elif idx == 1:
+            status = "진행중"
+            progress = 65
+            actual_start = str(start_date + timedelta(days=3))
+            next_action = "콘센트 위치 고객 확인"
+            approval_required = "예"
+            approval_status = "대기"
+
         rows.append(
             {
-                "ID": base_id + idx,
-                "프로젝트ID": project_id,
-                "프로젝트명": project_name,
-                "공정": process,
-                "진행상태": "대기",
-                "담당자": manager,
-                "진행률": 0,
-                "시작예정": str(start_date + timedelta(days=start_offset)),
-                "완료예정": str(start_date + timedelta(days=end_offset)),
-                "실제시작일": "",
-                "실제완료일": "",
-                "선행공정": "",
-                "자재상태": "미확인",
-                "고객승인필요": "아니오",
-                "고객승인상태": "해당없음",
-                "지연사유": "",
-                "다음액션": "",
-                "메모": "",
+                "project_id": project_id,
+                "process": process,
+                "status": status,
+                "manager": manager,
+                "progress": progress,
+                "planned_start": str(start_date + timedelta(days=start_offset)),
+                "planned_end": str(start_date + timedelta(days=end_offset)),
+                "actual_start": actual_start,
+                "actual_end": actual_end,
+                "material_status": "미확인",
+                "approval_required": approval_required,
+                "approval_status": approval_status,
+                "delay_reason": "",
+                "next_action": next_action,
+                "memo": "",
             }
         )
-
-    if rows:
-        rows[0]["진행상태"] = "완료"
-        rows[0]["진행률"] = 100
-        rows[0]["실제시작일"] = str(start_date)
-        rows[0]["실제완료일"] = str(start_date + timedelta(days=3))
-        rows[1]["진행상태"] = "진행중"
-        rows[1]["진행률"] = 65
-        rows[1]["실제시작일"] = str(start_date + timedelta(days=3))
-        rows[1]["다음액션"] = "콘센트 위치 고객 확인"
-        rows[1]["고객승인필요"] = "예"
-        rows[1]["고객승인상태"] = "대기"
-
-    return pd.DataFrame(rows)
+    return rows
 
 
-def create_empty_issues() -> pd.DataFrame:
-    return pd.DataFrame(
-        columns=[
-            "ID",
-            "프로젝트ID",
-            "프로젝트명",
-            "공정",
-            "이슈유형",
-            "중요도",
-            "내용",
-            "담당자",
-            "상태",
-            "등록일",
-            "처리기한",
-            "처리내용",
-        ]
+def create_default_project_if_empty():
+    projects = sb_select("projects")
+    if not projects.empty:
+        return
+    today = datetime.now().date()
+    res = sb_insert(
+        "projects",
+        {
+            "name": "해운대 아파트 34평 리모델링",
+            "address": "부산 해운대구 ○○동",
+            "client_name": "홍길동",
+            "contract_amount": 50000000,
+            "start_date": str(today),
+            "duration_days": 45,
+            "status": "진행중",
+            "pm": "박민서",
+            "memo": "기본 예시 현장",
+        },
+    )
+    project_id = res.data[0]["id"]
+    supabase.table("tasks").insert(default_process_rows(project_id, today)).execute()
+
+
+# -----------------------------
+# 데이터 로딩
+# -----------------------------
+def load_all_data():
+    projects = sb_select("projects")
+    tasks = sb_select("tasks")
+    issues = sb_select("issues")
+    change_orders = sb_select("change_orders")
+    photos = sb_select("photos")
+    return projects, tasks, issues, change_orders, photos
+
+
+try:
+    create_default_project_if_empty()
+except Exception as e:
+    st.error(f"기본 현장 생성 중 오류가 발생했습니다: {e}")
+    st.stop()
+
+projects_df, tasks_df, issues_df, change_orders_df, photos_df = load_all_data()
+
+
+# -----------------------------
+# 컬럼명 한글 표시용
+# -----------------------------
+def display_projects(df):
+    if df.empty:
+        return df
+    return df.rename(
+        columns={
+            "id": "프로젝트ID",
+            "name": "프로젝트명",
+            "address": "현장주소",
+            "client_name": "고객명",
+            "contract_amount": "계약금액",
+            "start_date": "공사시작일",
+            "duration_days": "예상공사기간",
+            "status": "상태",
+            "pm": "PM",
+            "memo": "메모",
+        }
     )
 
 
-def create_empty_change_orders() -> pd.DataFrame:
-    return pd.DataFrame(
-        columns=[
-            "ID",
-            "프로젝트ID",
-            "프로젝트명",
-            "공정",
-            "요청자",
-            "변경내용",
-            "추가금액",
-            "승인상태",
-            "승인방식",
-            "요청일",
-            "승인일",
-            "메모",
-        ]
+def display_tasks(df):
+    if df.empty:
+        return df
+    return df.rename(
+        columns={
+            "id": "ID",
+            "project_id": "프로젝트ID",
+            "process": "공정",
+            "status": "진행상태",
+            "manager": "담당자",
+            "progress": "진행률",
+            "planned_start": "시작예정",
+            "planned_end": "완료예정",
+            "actual_start": "실제시작일",
+            "actual_end": "실제완료일",
+            "material_status": "자재상태",
+            "approval_required": "고객승인필요",
+            "approval_status": "고객승인상태",
+            "delay_reason": "지연사유",
+            "next_action": "다음액션",
+            "memo": "메모",
+        }
     )
 
 
-def create_empty_photos() -> pd.DataFrame:
-    return pd.DataFrame(
-        columns=[
-            "ID",
-            "프로젝트ID",
-            "프로젝트명",
-            "공정",
-            "사진구분",
-            "파일명",
-            "저장경로",
-            "설명",
-            "업로드일시",
-        ]
+def display_issues(df):
+    if df.empty:
+        return df
+    return df.rename(
+        columns={
+            "id": "ID",
+            "project_id": "프로젝트ID",
+            "process": "공정",
+            "issue_type": "이슈유형",
+            "priority": "중요도",
+            "content": "내용",
+            "manager": "담당자",
+            "status": "상태",
+            "registered_date": "등록일",
+            "due_date": "처리기한",
+            "result": "처리내용",
+        }
     )
 
 
-# -----------------------------
-# 저장/불러오기
-# -----------------------------
-def load_csv(path: str, default_df: pd.DataFrame) -> pd.DataFrame:
-    if os.path.exists(path):
-        try:
-            return pd.read_csv(path)
-        except Exception:
-            return default_df
-    return default_df
+def display_changes(df):
+    if df.empty:
+        return df
+    return df.rename(
+        columns={
+            "id": "ID",
+            "project_id": "프로젝트ID",
+            "process": "공정",
+            "requester": "요청자",
+            "content": "변경내용",
+            "amount": "추가금액",
+            "approval_status": "승인상태",
+            "approval_method": "승인방식",
+            "request_date": "요청일",
+            "approval_date": "승인일",
+            "memo": "메모",
+        }
+    )
 
 
-def save_csv(df: pd.DataFrame, path: str) -> None:
-    df.to_csv(path, index=False, encoding="utf-8-sig")
+def display_photos(df):
+    if df.empty:
+        return df
+    return df.rename(
+        columns={
+            "id": "ID",
+            "project_id": "프로젝트ID",
+            "process": "공정",
+            "photo_type": "사진구분",
+            "file_name": "파일명",
+            "storage_path": "저장경로",
+            "description": "설명",
+            "uploaded_at": "업로드일시",
+        }
+    )
 
 
-def next_id(df: pd.DataFrame, id_col: str = "ID") -> int:
-    if df.empty or id_col not in df.columns:
-        return 1
-    ids = pd.to_numeric(df[id_col], errors="coerce").dropna()
-    if ids.empty:
-        return 1
-    return int(ids.max()) + 1
-
-
-def make_excel_file(projects_df, tasks_df, issues_df, change_orders_df, photos_df) -> BytesIO:
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        projects_df.to_excel(writer, index=False, sheet_name="현장목록")
-        tasks_df.to_excel(writer, index=False, sheet_name="공정현황")
-        issues_df.to_excel(writer, index=False, sheet_name="이슈관리")
-        change_orders_df.to_excel(writer, index=False, sheet_name="추가공사")
-        photos_df.to_excel(writer, index=False, sheet_name="사진기록")
-    output.seek(0)
-    return output
-
-
-def safe_date(value, default=None):
-    try:
-        parsed = pd.to_datetime(value, errors="coerce")
-        if pd.isna(parsed):
-            return default or datetime.now().date()
-        return parsed.date()
-    except Exception:
-        return default or datetime.now().date()
-
-
-# -----------------------------
-# 초기화
-# -----------------------------
-ensure_dirs()
-
-if "projects" not in st.session_state:
-    st.session_state["projects"] = load_csv(PROJECTS_FILE, create_default_projects())
-
-if "tasks" not in st.session_state:
-    projects_default = st.session_state["projects"]
-    if projects_default.empty:
-        default_tasks = pd.DataFrame()
-    else:
-        p = projects_default.iloc[0]
-        default_tasks = create_default_tasks(int(p["프로젝트ID"]), str(p["프로젝트명"]), safe_date(p["공사시작일"]))
-    st.session_state["tasks"] = load_csv(TASKS_FILE, default_tasks)
-
-if "issues" not in st.session_state:
-    st.session_state["issues"] = load_csv(ISSUES_FILE, create_empty_issues())
-
-if "change_orders" not in st.session_state:
-    st.session_state["change_orders"] = load_csv(CHANGE_ORDERS_FILE, create_empty_change_orders())
-
-if "photos" not in st.session_state:
-    st.session_state["photos"] = load_csv(PHOTOS_FILE, create_empty_photos())
-
-projects_df = st.session_state["projects"]
-tasks_df = st.session_state["tasks"]
-issues_df = st.session_state["issues"]
-change_orders_df = st.session_state["change_orders"]
-photos_df = st.session_state["photos"]
+def task_values_from_display(row):
+    return {
+        "process": str(row.get("공정", "")),
+        "status": str(row.get("진행상태", "대기")),
+        "manager": str(row.get("담당자", "")),
+        "progress": to_int(row.get("진행률", 0)),
+        "planned_start": to_date_str(row.get("시작예정")),
+        "planned_end": to_date_str(row.get("완료예정")),
+        "actual_start": to_date_str(row.get("실제시작일")),
+        "actual_end": to_date_str(row.get("실제완료일")),
+        "material_status": str(row.get("자재상태", "미확인")),
+        "approval_required": str(row.get("고객승인필요", "아니오")),
+        "approval_status": str(row.get("고객승인상태", "해당없음")),
+        "delay_reason": str(row.get("지연사유", "")),
+        "next_action": str(row.get("다음액션", "")),
+        "memo": str(row.get("메모", "")),
+    }
 
 
 # -----------------------------
@@ -257,17 +329,13 @@ photos_df = st.session_state["photos"]
 st.sidebar.header("현장 관리")
 
 if projects_df.empty:
-    st.sidebar.warning("등록된 현장이 없습니다. 새 현장을 추가해 주세요.")
-    selected_project_id = None
-    selected_project = None
-else:
-    project_options = {
-        f"[{int(row['프로젝트ID'])}] {row['프로젝트명']}": int(row["프로젝트ID"])
-        for _, row in projects_df.iterrows()
-    }
-    selected_label = st.sidebar.selectbox("현재 현장 선택", list(project_options.keys()))
-    selected_project_id = project_options[selected_label]
-    selected_project = projects_df[projects_df["프로젝트ID"] == selected_project_id].iloc[0]
+    st.sidebar.warning("등록된 현장이 없습니다.")
+    st.stop()
+
+project_options = {f"[{int(row['id'])}] {row['name']}": int(row["id"]) for _, row in projects_df.iterrows()}
+selected_label = st.sidebar.selectbox("현재 현장 선택", list(project_options.keys()))
+selected_project_id = project_options[selected_label]
+selected_project = projects_df[projects_df["id"] == selected_project_id].iloc[0]
 
 with st.sidebar.expander("➕ 새 현장 추가", expanded=False):
     with st.form("new_project_form", clear_on_submit=True):
@@ -282,103 +350,97 @@ with st.sidebar.expander("➕ 새 현장 추가", expanded=False):
         create_project = st.form_submit_button("현장 추가")
 
         if create_project:
-            new_project_id = next_id(projects_df, "프로젝트ID")
-            new_project = {
-                "프로젝트ID": new_project_id,
-                "프로젝트명": new_name,
-                "현장주소": new_address,
-                "고객명": new_client,
-                "계약금액": new_amount,
-                "공사시작일": str(new_start),
-                "예상공사기간": new_duration,
-                "상태": "진행중",
-                "PM": new_pm,
-                "메모": new_memo,
-            }
-            projects_df = pd.concat([projects_df, pd.DataFrame([new_project])], ignore_index=True)
-            new_tasks = create_default_tasks(new_project_id, new_name, new_start)
-            tasks_df = pd.concat([tasks_df, new_tasks], ignore_index=True)
-
-            st.session_state["projects"] = projects_df
-            st.session_state["tasks"] = tasks_df
-            save_csv(projects_df, PROJECTS_FILE)
-            save_csv(tasks_df, TASKS_FILE)
-            st.success("새 현장과 기본 공정표가 생성되었습니다.")
-            st.rerun()
+            try:
+                res = sb_insert(
+                    "projects",
+                    {
+                        "name": new_name,
+                        "address": new_address,
+                        "client_name": new_client,
+                        "contract_amount": int(new_amount),
+                        "start_date": str(new_start),
+                        "duration_days": int(new_duration),
+                        "status": "진행중",
+                        "pm": new_pm,
+                        "memo": new_memo,
+                    },
+                )
+                new_project_id = res.data[0]["id"]
+                supabase.table("tasks").insert(default_process_rows(new_project_id, new_start)).execute()
+                st.success("새 현장과 기본 공정표가 Supabase에 저장되었습니다.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"현장 추가 실패: {e}")
 
 
 # -----------------------------
 # 선택 현장 데이터
 # -----------------------------
-if selected_project_id is None:
-    st.stop()
+project_tasks = tasks_df[tasks_df["project_id"] == selected_project_id] if not tasks_df.empty else pd.DataFrame()
+project_issues = issues_df[issues_df["project_id"] == selected_project_id] if not issues_df.empty else pd.DataFrame()
+project_changes = change_orders_df[change_orders_df["project_id"] == selected_project_id] if not change_orders_df.empty else pd.DataFrame()
+project_photos = photos_df[photos_df["project_id"] == selected_project_id] if not photos_df.empty else pd.DataFrame()
 
-project_tasks = tasks_df[tasks_df["프로젝트ID"] == selected_project_id]
-project_issues = issues_df[issues_df["프로젝트ID"] == selected_project_id] if not issues_df.empty else issues_df
-project_changes = change_orders_df[change_orders_df["프로젝트ID"] == selected_project_id] if not change_orders_df.empty else change_orders_df
-project_photos = photos_df[photos_df["프로젝트ID"] == selected_project_id] if not photos_df.empty else photos_df
-
-project_name = str(selected_project["프로젝트명"])
-site_address = str(selected_project.get("현장주소", ""))
-client_name = str(selected_project.get("고객명", ""))
-contract_amount = int(pd.to_numeric(selected_project.get("계약금액", 0), errors="coerce") or 0)
-start_date = safe_date(selected_project.get("공사시작일", datetime.now().date()))
-expected_duration = int(pd.to_numeric(selected_project.get("예상공사기간", 45), errors="coerce") or 45)
+project_name = str(selected_project.get("name", ""))
+site_address = str(selected_project.get("address", ""))
+client_name = str(selected_project.get("client_name", ""))
+contract_amount = to_int(selected_project.get("contract_amount", 0))
+start_date = safe_date(selected_project.get("start_date"))
+expected_duration = to_int(selected_project.get("duration_days", 45), 45)
 expected_end_date = start_date + timedelta(days=expected_duration)
 
 
 # -----------------------------
-# 전체 현장 요약 계산
+# 전체 현장 요약
 # -----------------------------
-def calculate_project_summary(projects, tasks, issues, changes):
+def calculate_summary(projects, tasks, issues, changes):
     rows = []
     for _, p in projects.iterrows():
-        pid = int(p["프로젝트ID"])
-        t = tasks[tasks["프로젝트ID"] == pid]
-        i = issues[issues["프로젝트ID"] == pid] if not issues.empty else issues
-        c = changes[changes["프로젝트ID"] == pid] if not changes.empty else changes
-        progress = int(pd.to_numeric(t["진행률"], errors="coerce").fillna(0).mean()) if not t.empty else 0
-        open_issues = len(i[i["상태"].isin(["접수", "처리중"])]) if not i.empty and "상태" in i.columns else 0
-        pending_changes = len(c[c["승인상태"] == "대기"]) if not c.empty and "승인상태" in c.columns else 0
-        approved_amount = int(pd.to_numeric(c.loc[c["승인상태"] == "승인", "추가금액"], errors="coerce").fillna(0).sum()) if not c.empty and "승인상태" in c.columns else 0
+        pid = int(p["id"])
+        t = tasks[tasks["project_id"] == pid] if not tasks.empty else pd.DataFrame()
+        i = issues[issues["project_id"] == pid] if not issues.empty else pd.DataFrame()
+        c = changes[changes["project_id"] == pid] if not changes.empty else pd.DataFrame()
+        progress = int(pd.to_numeric(t["progress"], errors="coerce").fillna(0).mean()) if not t.empty else 0
+        open_issues = len(i[i["status"].isin(["접수", "처리중"])]) if not i.empty else 0
+        pending_changes = len(c[c["approval_status"] == "대기"]) if not c.empty else 0
+        approved_amount = int(pd.to_numeric(c.loc[c["approval_status"] == "승인", "amount"], errors="coerce").fillna(0).sum()) if not c.empty else 0
         rows.append(
             {
                 "프로젝트ID": pid,
-                "프로젝트명": p["프로젝트명"],
-                "상태": p.get("상태", ""),
-                "PM": p.get("PM", ""),
+                "프로젝트명": p.get("name", ""),
+                "상태": p.get("status", ""),
+                "PM": p.get("pm", ""),
                 "진행률": progress,
                 "미처리이슈": open_issues,
                 "미승인추가공사": pending_changes,
                 "승인추가금액": approved_amount,
-                "고객명": p.get("고객명", ""),
-                "현장주소": p.get("현장주소", ""),
+                "고객명": p.get("client_name", ""),
+                "현장주소": p.get("address", ""),
             }
         )
     return pd.DataFrame(rows)
 
 
-summary_df = calculate_project_summary(projects_df, tasks_df, issues_df, change_orders_df)
+summary_df = calculate_summary(projects_df, tasks_df, issues_df, change_orders_df)
 
 
 # -----------------------------
 # 상단 요약
 # -----------------------------
-col1, col2, col3, col4, col5 = st.columns(5)
-
-overall_progress = int(pd.to_numeric(project_tasks["진행률"], errors="coerce").fillna(0).mean()) if not project_tasks.empty else 0
-in_progress_count = len(project_tasks[project_tasks["진행상태"] == "진행중"]) if not project_tasks.empty else 0
-done_count = len(project_tasks[project_tasks["진행상태"] == "완료"]) if not project_tasks.empty else 0
-open_issues_count = len(project_issues[project_issues["상태"].isin(["접수", "처리중"])]) if not project_issues.empty and "상태" in project_issues.columns else 0
-pending_change_count = len(project_changes[project_changes["승인상태"] == "대기"]) if not project_changes.empty and "승인상태" in project_changes.columns else 0
+overall_progress = int(pd.to_numeric(project_tasks["progress"], errors="coerce").fillna(0).mean()) if not project_tasks.empty else 0
+in_progress_count = len(project_tasks[project_tasks["status"] == "진행중"]) if not project_tasks.empty else 0
+done_count = len(project_tasks[project_tasks["status"] == "완료"]) if not project_tasks.empty else 0
+open_issues_count = len(project_issues[project_issues["status"].isin(["접수", "처리중"])]) if not project_issues.empty else 0
+pending_change_count = len(project_changes[project_changes["approval_status"] == "대기"]) if not project_changes.empty else 0
 
 if not project_tasks.empty:
-    end_dates = pd.to_datetime(project_tasks["완료예정"], errors="coerce")
+    end_dates = pd.to_datetime(project_tasks["planned_end"], errors="coerce")
     max_end = end_dates.max()
     remaining_days = (max_end.date() - datetime.now().date()).days if pd.notna(max_end) else 0
 else:
     remaining_days = 0
 
+col1, col2, col3, col4, col5 = st.columns(5)
 col1.metric("선택 현장 진행률", f"{overall_progress}%")
 col2.metric("진행중 공정", f"{in_progress_count}개")
 col3.metric("완료 공정", f"{done_count}개")
@@ -413,21 +475,40 @@ with tab0:
         fig_all.update_layout(height=420)
         st.plotly_chart(fig_all, use_container_width=True)
 
-    st.subheader("현장 목록 직접 수정")
-    edited_projects = st.data_editor(
-        projects_df,
-        use_container_width=True,
-        num_rows="dynamic",
-        hide_index=True,
-        column_config={
-            "상태": st.column_config.SelectboxColumn("상태", options=["준비중", "진행중", "보류", "완료", "취소"]),
-        },
-    )
-    if st.button("💾 현장 목록 저장"):
-        st.session_state["projects"] = edited_projects
-        save_csv(edited_projects, PROJECTS_FILE)
-        st.success("현장 목록이 저장되었습니다.")
-        st.rerun()
+    st.subheader("선택 현장 기본정보 수정")
+    with st.form("edit_project_form"):
+        edit_name = st.text_input("프로젝트명", project_name)
+        edit_address = st.text_input("현장주소", site_address)
+        edit_client = st.text_input("고객명", client_name)
+        edit_amount = st.number_input("계약금액", min_value=0, value=contract_amount, step=1000000, format="%d")
+        edit_start = st.date_input("공사시작일", start_date)
+        edit_duration = st.number_input("예상공사기간", min_value=1, value=expected_duration, step=1)
+        edit_status = st.selectbox("상태", ["준비중", "진행중", "보류", "완료", "취소"], index=["준비중", "진행중", "보류", "완료", "취소"].index(str(selected_project.get("status", "진행중"))) if str(selected_project.get("status", "진행중")) in ["준비중", "진행중", "보류", "완료", "취소"] else 1)
+        edit_pm = st.text_input("PM", str(selected_project.get("pm", "")))
+        edit_memo = st.text_area("메모", str(selected_project.get("memo", "")))
+        save_project = st.form_submit_button("💾 선택 현장 기본정보 저장")
+
+        if save_project:
+            try:
+                sb_update(
+                    "projects",
+                    selected_project_id,
+                    {
+                        "name": edit_name,
+                        "address": edit_address,
+                        "client_name": edit_client,
+                        "contract_amount": int(edit_amount),
+                        "start_date": str(edit_start),
+                        "duration_days": int(edit_duration),
+                        "status": edit_status,
+                        "pm": edit_pm,
+                        "memo": edit_memo,
+                    },
+                )
+                st.success("현장 기본정보가 저장되었습니다.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"저장 실패: {e}")
 
 
 # -----------------------------
@@ -439,14 +520,12 @@ with tab1:
     if project_tasks.empty:
         st.warning("이 현장의 공정 데이터가 없습니다.")
         if st.button("현재 현장 기본 공정표 생성"):
-            new_tasks = create_default_tasks(selected_project_id, project_name, start_date)
-            tasks_df = pd.concat([tasks_df, new_tasks], ignore_index=True)
-            st.session_state["tasks"] = tasks_df
-            save_csv(tasks_df, TASKS_FILE)
+            supabase.table("tasks").insert(default_process_rows(selected_project_id, start_date)).execute()
             st.rerun()
     else:
+        display_project_tasks = display_tasks(project_tasks)
         fig = px.bar(
-            project_tasks,
+            display_project_tasks,
             x="공정",
             y="진행률",
             color="진행상태",
@@ -458,10 +537,10 @@ with tab1:
         st.plotly_chart(fig, use_container_width=True)
 
         st.subheader("오늘 확인할 항목")
-        check_df = project_tasks[
-            (project_tasks["진행상태"].isin(["진행중", "보류"]))
-            | (project_tasks["고객승인상태"].isin(["대기", "보류"]))
-            | (project_tasks["지연사유"].fillna("") != "")
+        check_df = display_project_tasks[
+            (display_project_tasks["진행상태"].isin(["진행중", "보류"]))
+            | (display_project_tasks["고객승인상태"].isin(["대기", "보류"]))
+            | (display_project_tasks["지연사유"].fillna("") != "")
         ]
         if check_df.empty:
             st.success("현재 특별히 확인할 항목이 없습니다.")
@@ -470,66 +549,70 @@ with tab1:
 
 
 # -----------------------------
-# 탭2: Kanban
+# 탭2: Kanban + 공정 직접 수정
 # -----------------------------
 with tab2:
     st.subheader("공정 Kanban 보드")
     status_order = ["대기", "진행중", "완료", "보류"]
     cols = st.columns(4)
 
-    for idx, status in enumerate(status_order):
-        with cols[idx]:
-            st.markdown(f"### {status}")
-            filtered = project_tasks[project_tasks["진행상태"] == status]
+    if project_tasks.empty:
+        st.info("등록된 공정이 없습니다.")
+    else:
+        for idx, status in enumerate(status_order):
+            with cols[idx]:
+                st.markdown(f"### {status}")
+                filtered = project_tasks[project_tasks["status"] == status]
+                if filtered.empty:
+                    st.caption("해당 공정 없음")
+                for _, row in filtered.iterrows():
+                    row_id = int(row["id"])
+                    with st.expander(f"{row['process']} / {row.get('manager','')} / {row.get('progress',0)}%"):
+                        new_progress = st.slider("진행률", 0, 100, to_int(row.get("progress", 0)), key=f"prog_{row_id}")
+                        new_status = st.selectbox("상태", status_order, index=status_order.index(row.get("status", "대기")) if row.get("status", "대기") in status_order else 0, key=f"stat_{row_id}")
+                        next_action = st.text_input("다음 액션", str(row.get("next_action", "")), key=f"next_{row_id}")
+                        delay_reason = st.text_area("지연사유", str(row.get("delay_reason", "")), key=f"delay_{row_id}")
 
-            if filtered.empty:
-                st.caption("해당 공정 없음")
-
-            for _, row in filtered.iterrows():
-                row_id = int(row["ID"])
-                with st.expander(f"{row['공정']} / {row['담당자']} / {row['진행률']}%"):
-                    new_progress = st.slider("진행률", 0, 100, int(row["진행률"]), key=f"prog_{row_id}")
-                    new_status = st.selectbox("상태", status_order, index=status_order.index(row["진행상태"]), key=f"stat_{row_id}")
-                    next_action = st.text_input("다음 액션", str(row.get("다음액션", "")), key=f"next_{row_id}")
-                    delay_reason = st.text_area("지연사유", str(row.get("지연사유", "")), key=f"delay_{row_id}")
-
-                    if st.button("저장", key=f"save_task_{row_id}"):
-                        task_index = tasks_df[tasks_df["ID"] == row_id].index
-                        if len(task_index) > 0:
-                            i = task_index[0]
-                            tasks_df.at[i, "진행률"] = new_progress
-                            tasks_df.at[i, "진행상태"] = new_status
-                            tasks_df.at[i, "다음액션"] = next_action
-                            tasks_df.at[i, "지연사유"] = delay_reason
-                            if new_status == "완료" and not str(tasks_df.at[i, "실제완료일"]):
-                                tasks_df.at[i, "실제완료일"] = str(datetime.now().date())
-                            save_csv(tasks_df, TASKS_FILE)
-                            st.session_state["tasks"] = tasks_df
+                        if st.button("저장", key=f"save_task_{row_id}"):
+                            values = {
+                                "progress": int(new_progress),
+                                "status": new_status,
+                                "next_action": next_action,
+                                "delay_reason": delay_reason,
+                            }
+                            if new_status == "완료" and not row.get("actual_end"):
+                                values["actual_end"] = str(datetime.now().date())
+                            sb_update("tasks", row_id, values)
                             st.success("공정 정보가 저장되었습니다.")
                             st.rerun()
 
     st.divider()
     st.subheader("선택 현장 공정표 직접 수정")
-    edited_project_tasks = st.data_editor(
-        project_tasks,
-        use_container_width=True,
-        num_rows="dynamic",
-        hide_index=True,
-        column_config={
-            "진행상태": st.column_config.SelectboxColumn("진행상태", options=["대기", "진행중", "완료", "보류"]),
-            "자재상태": st.column_config.SelectboxColumn("자재상태", options=["미확인", "발주전", "발주완료", "입고완료", "문제발생"]),
-            "고객승인필요": st.column_config.SelectboxColumn("고객승인필요", options=["예", "아니오"]),
-            "고객승인상태": st.column_config.SelectboxColumn("고객승인상태", options=["해당없음", "대기", "승인", "거절", "보류"]),
-        },
-    )
+    if not project_tasks.empty:
+        edit_df = display_tasks(project_tasks).copy()
+        editable_cols = ["ID", "공정", "진행상태", "담당자", "진행률", "시작예정", "완료예정", "실제시작일", "실제완료일", "자재상태", "고객승인필요", "고객승인상태", "지연사유", "다음액션", "메모"]
+        edit_df = edit_df[editable_cols]
+        edited_tasks = st.data_editor(
+            edit_df,
+            use_container_width=True,
+            num_rows="fixed",
+            hide_index=True,
+            column_config={
+                "진행상태": st.column_config.SelectboxColumn("진행상태", options=["대기", "진행중", "완료", "보류"]),
+                "자재상태": st.column_config.SelectboxColumn("자재상태", options=["미확인", "발주전", "발주완료", "입고완료", "문제발생"]),
+                "고객승인필요": st.column_config.SelectboxColumn("고객승인필요", options=["예", "아니오"]),
+                "고객승인상태": st.column_config.SelectboxColumn("고객승인상태", options=["해당없음", "대기", "승인", "거절", "보류"]),
+            },
+        )
 
-    if st.button("💾 선택 현장 공정표 저장"):
-        other_tasks = tasks_df[tasks_df["프로젝트ID"] != selected_project_id]
-        combined_tasks = pd.concat([other_tasks, edited_project_tasks], ignore_index=True)
-        st.session_state["tasks"] = combined_tasks
-        save_csv(combined_tasks, TASKS_FILE)
-        st.success("선택 현장 공정표가 저장되었습니다.")
-        st.rerun()
+        if st.button("💾 선택 현장 공정표 저장"):
+            try:
+                for _, row in edited_tasks.iterrows():
+                    sb_update("tasks", int(row["ID"]), task_values_from_display(row))
+                st.success("공정표가 Supabase에 저장되었습니다.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"공정표 저장 실패: {e}")
 
 
 # -----------------------------
@@ -540,22 +623,14 @@ with tab3:
     if project_tasks.empty:
         st.warning("표시할 공정이 없습니다.")
     else:
-        timeline_df = project_tasks.copy()
+        timeline_df = display_tasks(project_tasks).copy()
         timeline_df["시작예정"] = pd.to_datetime(timeline_df["시작예정"], errors="coerce")
         timeline_df["완료예정"] = pd.to_datetime(timeline_df["완료예정"], errors="coerce")
         timeline_df = timeline_df.dropna(subset=["시작예정", "완료예정"])
-
         if timeline_df.empty:
             st.warning("시작예정/완료예정 날짜를 확인해 주세요.")
         else:
-            fig_timeline = px.timeline(
-                timeline_df,
-                x_start="시작예정",
-                x_end="완료예정",
-                y="공정",
-                color="진행상태",
-                hover_data=["담당자", "진행률", "다음액션"],
-            )
+            fig_timeline = px.timeline(timeline_df, x_start="시작예정", x_end="완료예정", y="공정", color="진행상태", hover_data=["담당자", "진행률", "다음액션"])
             fig_timeline.update_yaxes(autorange="reversed")
             fig_timeline.update_layout(height=520)
             st.plotly_chart(fig_timeline, use_container_width=True)
@@ -566,13 +641,13 @@ with tab3:
 # -----------------------------
 with tab4:
     st.subheader("이슈 등록")
+    process_options = list(project_tasks["process"].unique()) if not project_tasks.empty else ["공통"]
 
     with st.form("issue_form", clear_on_submit=True):
         c1, c2, c3 = st.columns(3)
-        issue_process = c1.selectbox("공정", list(project_tasks["공정"].unique()) if not project_tasks.empty else ["공통"])
+        issue_process = c1.selectbox("공정", process_options)
         issue_type = c2.selectbox("이슈유형", ["일정지연", "자재문제", "하자", "고객요청", "작업자문제", "안전", "기타"])
         issue_level = c3.selectbox("중요도", ["낮음", "보통", "높음", "긴급"])
-
         issue_content = st.text_area("내용")
         c4, c5, c6 = st.columns(3)
         issue_manager = c4.text_input("담당자")
@@ -580,38 +655,31 @@ with tab4:
         issue_due = c6.date_input("처리기한", datetime.now().date() + timedelta(days=3))
         issue_result = st.text_area("처리내용")
 
-        submitted = st.form_submit_button("이슈 저장")
-        if submitted:
-            new_row = {
-                "ID": next_id(issues_df),
-                "프로젝트ID": selected_project_id,
-                "프로젝트명": project_name,
-                "공정": issue_process,
-                "이슈유형": issue_type,
-                "중요도": issue_level,
-                "내용": issue_content,
-                "담당자": issue_manager,
-                "상태": issue_status,
-                "등록일": str(datetime.now().date()),
-                "처리기한": str(issue_due),
-                "처리내용": issue_result,
-            }
-            issues_df = pd.concat([issues_df, pd.DataFrame([new_row])], ignore_index=True)
-            st.session_state["issues"] = issues_df
-            save_csv(issues_df, ISSUES_FILE)
-            st.success("이슈가 저장되었습니다.")
-            st.rerun()
+        if st.form_submit_button("이슈 저장"):
+            try:
+                sb_insert(
+                    "issues",
+                    {
+                        "project_id": selected_project_id,
+                        "process": issue_process,
+                        "issue_type": issue_type,
+                        "priority": issue_level,
+                        "content": issue_content,
+                        "manager": issue_manager,
+                        "status": issue_status,
+                        "registered_date": str(datetime.now().date()),
+                        "due_date": str(issue_due),
+                        "result": issue_result,
+                    },
+                )
+                st.success("이슈가 Supabase에 저장되었습니다.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"이슈 저장 실패: {e}")
 
     st.divider()
     st.subheader("선택 현장 이슈 목록")
-    edited_project_issues = st.data_editor(project_issues, use_container_width=True, num_rows="dynamic", hide_index=True)
-    if st.button("💾 선택 현장 이슈 저장"):
-        other_issues = issues_df[issues_df["프로젝트ID"] != selected_project_id] if not issues_df.empty else issues_df
-        combined_issues = pd.concat([other_issues, edited_project_issues], ignore_index=True)
-        st.session_state["issues"] = combined_issues
-        save_csv(combined_issues, ISSUES_FILE)
-        st.success("이슈 목록이 저장되었습니다.")
-        st.rerun()
+    st.dataframe(display_issues(project_issues), use_container_width=True, hide_index=True)
 
 
 # -----------------------------
@@ -620,13 +688,13 @@ with tab4:
 with tab5:
     st.subheader("추가공사/변경 요청 등록")
     st.caption("분쟁 예방을 위해 변경내용, 추가금액, 승인방식, 승인일을 반드시 남기는 것을 권장합니다.")
+    process_options = list(project_tasks["process"].unique()) if not project_tasks.empty else ["공통"]
 
     with st.form("change_order_form", clear_on_submit=True):
         c1, c2, c3 = st.columns(3)
-        co_process = c1.selectbox("공정", list(project_tasks["공정"].unique()) if not project_tasks.empty else ["공통"], key="co_process")
+        co_process = c1.selectbox("공정", process_options, key="co_process")
         requester = c2.selectbox("요청자", ["고객", "시공자", "협력업체", "기타"])
         amount = c3.number_input("추가금액", min_value=0, value=0, step=100000, format="%d")
-
         change_content = st.text_area("변경내용")
         c4, c5, c6 = st.columns(3)
         approval_status = c4.selectbox("승인상태", ["대기", "승인", "거절", "보류"])
@@ -635,42 +703,34 @@ with tab5:
         approval_date = st.date_input("승인일", datetime.now().date())
         co_memo = st.text_area("메모")
 
-        co_submitted = st.form_submit_button("추가공사 저장")
-        if co_submitted:
-            new_row = {
-                "ID": next_id(change_orders_df),
-                "프로젝트ID": selected_project_id,
-                "프로젝트명": project_name,
-                "공정": co_process,
-                "요청자": requester,
-                "변경내용": change_content,
-                "추가금액": amount,
-                "승인상태": approval_status,
-                "승인방식": approval_method,
-                "요청일": str(request_date),
-                "승인일": str(approval_date) if approval_status == "승인" else "",
-                "메모": co_memo,
-            }
-            change_orders_df = pd.concat([change_orders_df, pd.DataFrame([new_row])], ignore_index=True)
-            st.session_state["change_orders"] = change_orders_df
-            save_csv(change_orders_df, CHANGE_ORDERS_FILE)
-            st.success("추가공사 기록이 저장되었습니다.")
-            st.rerun()
+        if st.form_submit_button("추가공사 저장"):
+            try:
+                sb_insert(
+                    "change_orders",
+                    {
+                        "project_id": selected_project_id,
+                        "process": co_process,
+                        "requester": requester,
+                        "content": change_content,
+                        "amount": int(amount),
+                        "approval_status": approval_status,
+                        "approval_method": approval_method,
+                        "request_date": str(request_date),
+                        "approval_date": str(approval_date) if approval_status == "승인" else None,
+                        "memo": co_memo,
+                    },
+                )
+                st.success("추가공사 기록이 Supabase에 저장되었습니다.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"추가공사 저장 실패: {e}")
 
     st.divider()
     st.subheader("선택 현장 추가공사 목록")
     if not project_changes.empty:
-        total_approved = pd.to_numeric(project_changes.loc[project_changes["승인상태"] == "승인", "추가금액"], errors="coerce").fillna(0).sum()
+        total_approved = pd.to_numeric(project_changes.loc[project_changes["approval_status"] == "승인", "amount"], errors="coerce").fillna(0).sum()
         st.metric("승인된 추가공사 합계", f"{int(total_approved):,}원")
-
-    edited_project_changes = st.data_editor(project_changes, use_container_width=True, num_rows="dynamic", hide_index=True)
-    if st.button("💾 선택 현장 추가공사 저장"):
-        other_changes = change_orders_df[change_orders_df["프로젝트ID"] != selected_project_id] if not change_orders_df.empty else change_orders_df
-        combined_changes = pd.concat([other_changes, edited_project_changes], ignore_index=True)
-        st.session_state["change_orders"] = combined_changes
-        save_csv(combined_changes, CHANGE_ORDERS_FILE)
-        st.success("추가공사 목록이 저장되었습니다.")
-        st.rerun()
+    st.dataframe(display_changes(project_changes), use_container_width=True, hide_index=True)
 
 
 # -----------------------------
@@ -678,103 +738,96 @@ with tab5:
 # -----------------------------
 with tab6:
     st.subheader("현장 사진/증거 업로드")
-    st.caption("공정별 작업 전·중·후 사진을 남기면 하자, 추가공사, 일정 지연 분쟁 대응에 도움이 됩니다.")
+    st.caption("Supabase Storage에 사진을 저장하고, DB에는 사진 기록을 남깁니다.")
+    process_options = list(project_tasks["process"].unique()) if not project_tasks.empty else ["공통"]
 
     c1, c2, c3 = st.columns(3)
-    photo_process = c1.selectbox("공정", list(project_tasks["공정"].unique()) if not project_tasks.empty else ["공통"], key="photo_process")
+    photo_process = c1.selectbox("공정", process_options, key="photo_process")
     photo_type = c2.selectbox("사진구분", ["작업 전", "작업 중", "작업 후", "하자", "자재", "고객요청", "기타"])
     photo_description = c3.text_input("사진 설명")
 
     uploaded_files = st.file_uploader("사진 업로드 JPG/PNG/JPEG", type=["jpg", "png", "jpeg"], accept_multiple_files=True)
 
     if uploaded_files and st.button("📸 사진 저장"):
-        new_rows = []
-        for uploaded_file in uploaded_files:
-            ext = os.path.splitext(uploaded_file.name)[1].lower()
-            safe_project = project_name.replace("/", "_").replace("\\", "_").replace(" ", "_")
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-            saved_filename = f"P{selected_project_id}_{safe_project}_{photo_process}_{timestamp}{ext}"
-            saved_path = os.path.join(PHOTO_DIR, saved_filename)
+        try:
+            for uploaded_file in uploaded_files:
+                ext = os.path.splitext(uploaded_file.name)[1].lower()
+                unique_name = f"project_{selected_project_id}/{datetime.now().strftime('%Y%m%d')}/{uuid.uuid4().hex}{ext}"
+                file_bytes = uploaded_file.getvalue()
 
-            image = Image.open(uploaded_file)
-            image.save(saved_path)
+                supabase.storage.from_(BUCKET).upload(
+                    unique_name,
+                    file_bytes,
+                    {"content-type": uploaded_file.type, "upsert": "true"},
+                )
 
-            new_rows.append(
-                {
-                    "ID": next_id(photos_df) + len(new_rows),
-                    "프로젝트ID": selected_project_id,
-                    "프로젝트명": project_name,
-                    "공정": photo_process,
-                    "사진구분": photo_type,
-                    "파일명": uploaded_file.name,
-                    "저장경로": saved_path,
-                    "설명": photo_description,
-                    "업로드일시": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                }
-            )
-
-        photos_df = pd.concat([photos_df, pd.DataFrame(new_rows)], ignore_index=True)
-        st.session_state["photos"] = photos_df
-        save_csv(photos_df, PHOTOS_FILE)
-        st.success("사진이 저장되었습니다.")
-        st.rerun()
+                sb_insert(
+                    "photos",
+                    {
+                        "project_id": selected_project_id,
+                        "process": photo_process,
+                        "photo_type": photo_type,
+                        "file_name": uploaded_file.name,
+                        "storage_path": unique_name,
+                        "description": photo_description,
+                    },
+                )
+            st.success("사진이 Supabase Storage에 저장되었습니다.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"사진 저장 실패: {e}")
 
     st.divider()
     st.subheader("선택 현장 사진 기록 목록")
-    st.dataframe(project_photos, use_container_width=True, hide_index=True)
+    st.dataframe(display_photos(project_photos), use_container_width=True, hide_index=True)
 
     st.subheader("사진 미리보기")
     if project_photos.empty:
         st.info("아직 저장된 사진이 없습니다.")
     else:
-        recent_photos = project_photos.tail(12).iloc[::-1]
         photo_cols = st.columns(3)
+        recent_photos = project_photos.tail(12).iloc[::-1]
         for idx, (_, row) in enumerate(recent_photos.iterrows()):
             with photo_cols[idx % 3]:
-                path = str(row.get("저장경로", ""))
-                if os.path.exists(path):
-                    st.image(path, caption=f"{row.get('공정', '')} / {row.get('사진구분', '')} / {row.get('설명', '')}", use_container_width=True)
-                else:
-                    st.warning(f"파일을 찾을 수 없습니다: {path}")
+                try:
+                    public_url = supabase.storage.from_(BUCKET).get_public_url(row["storage_path"])
+                    st.image(public_url, caption=f"{row.get('process', '')} / {row.get('photo_type', '')} / {row.get('description', '')}", use_container_width=True)
+                except Exception:
+                    st.warning("사진 URL을 불러오지 못했습니다.")
 
 
 # -----------------------------
 # 탭7: 데이터 관리
 # -----------------------------
 with tab7:
-    st.subheader("전체 데이터 백업 및 다운로드")
+    st.subheader("전체 데이터 다운로드")
 
-    c1, c2 = st.columns(2)
+    projects_display = display_projects(projects_df)
+    tasks_display = display_tasks(tasks_df)
+    issues_display = display_issues(issues_df)
+    changes_display = display_changes(change_orders_df)
+    photos_display = display_photos(photos_df)
 
-    with c1:
-        if st.button("💾 모든 데이터 저장"):
-            save_csv(st.session_state["projects"], PROJECTS_FILE)
-            save_csv(st.session_state["tasks"], TASKS_FILE)
-            save_csv(st.session_state["issues"], ISSUES_FILE)
-            save_csv(st.session_state["change_orders"], CHANGE_ORDERS_FILE)
-            save_csv(st.session_state["photos"], PHOTOS_FILE)
-            st.success("모든 데이터가 저장되었습니다.")
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        projects_display.to_excel(writer, index=False, sheet_name="현장목록")
+        tasks_display.to_excel(writer, index=False, sheet_name="공정현황")
+        issues_display.to_excel(writer, index=False, sheet_name="이슈관리")
+        changes_display.to_excel(writer, index=False, sheet_name="추가공사")
+        photos_display.to_excel(writer, index=False, sheet_name="사진기록")
+    output.seek(0)
 
-    with c2:
-        excel_data = make_excel_file(
-            st.session_state["projects"],
-            st.session_state["tasks"],
-            st.session_state["issues"],
-            st.session_state["change_orders"],
-            st.session_state["photos"],
-        )
-        st.download_button(
-            label="📥 전체 현황 엑셀 다운로드",
-            data=excel_data,
-            file_name=f"Interior_Flow_v2_현황_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-
-    st.divider()
-    st.subheader("주의사항")
-    st.warning(
-        "현재 Streamlit Community Cloud의 파일 저장은 영구 DB가 아닙니다. 앱이 재시작되거나 배포가 갱신되면 CSV/사진 파일이 초기화될 수 있습니다. "
-        "실사용 단계에서는 Supabase 같은 외부 DB와 Storage 연동이 필요합니다."
+    st.download_button(
+        label="📥 전체 현황 엑셀 다운로드",
+        data=output,
+        file_name=f"Interior_Flow_v3_현황_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
-st.caption("Interior Flow v2 / 다현장 관리 MVP / 다음 단계: Supabase DB, 로그인, 모바일 입력 최적화, AI 일일 리포트")
+    st.divider()
+    st.subheader("연결 상태")
+    st.success("Supabase DB 연결 상태: 정상")
+    st.info(f"Storage bucket: {BUCKET}")
+    st.warning("현재 RLS 정책은 테스트용으로 anon 전체 허용 상태입니다. 실사용 전에는 로그인, 사용자 권한, private bucket 구조로 전환해야 합니다.")
+
+st.caption("Interior Flow v3 / Supabase DB + Storage 저장형 / 다음 단계: 로그인, 권한관리, 모바일 현장 입력 화면, AI 일일 리포트")
