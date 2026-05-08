@@ -123,7 +123,6 @@ def currency_input(label, value=0, key=None, use_callback=False):
     kwargs = {
         "label": label,
         "key": key,
-        "help": "숫자만 입력해도 됩니다. 예: 50000000 또는 50,000,000원. 입력 후 Enter 또는 Tab을 누르면 정리됩니다.",
     }
     if use_callback:
         kwargs["on_change"] = normalize_currency_input
