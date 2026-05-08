@@ -80,42 +80,9 @@ def format_currency(value):
     try:
         if value is None or value == "":
             return "0원"
-        cleaned = str(value).replace(",", "").replace("원", "").strip()
-        if cleaned == "":
-            return "0원"
-        return f"{int(float(cleaned)):,}원"
+        return format(int(float(value)), ',') + '원'
     except Exception:
         return "0원"
-
-
-def parse_currency(value):
-    """50,000,000원 또는 50000000 형태의 입력값을 정수로 변환합니다."""
-    try:
-        if value is None or value == "":
-            return 0
-        cleaned = str(value).replace(",", "").replace("원", "").strip()
-        if cleaned == "":
-            return 0
-        return int(float(cleaned))
-    except Exception:
-        return 0
-
-
-def currency_input(label, value=0, key=None):
-    """Streamlit number_input 대신 콤마가 보이는 금액 입력칸을 제공합니다."""
-    text_value = st.text_input(label, value=format_currency(value), key=key)
-    return parse_currency(text_value)
-
-
-def format_money_columns(df, columns):
-    """데이터프레임의 금액 컬럼을 콤마 포함 원화 문자열로 변환합니다."""
-    if df is None or df.empty:
-        return df
-    result = df.copy()
-    for col in columns:
-        if col in result.columns:
-            result[col] = result[col].apply(format_currency)
-    return result
 
 
 def to_date_str(value):
@@ -376,6 +343,20 @@ def task_values_from_display(row):
     }
 
 
+# -------------------------------------------------------
+# 금액 컬럼용 column_config (dataframe/data_editor 공용)
+# -------------------------------------------------------
+MONEY_COL_CONFIG = {
+    "총계약금액":   st.column_config.NumberColumn("총계약금액",   format="%,d원"),
+    "계약금":       st.column_config.NumberColumn("계약금",       format="%,d원"),
+    "1차지급":      st.column_config.NumberColumn("1차지급",      format="%,d원"),
+    "2차지급":      st.column_config.NumberColumn("2차지급",      format="%,d원"),
+    "3차지급":      st.column_config.NumberColumn("3차지급",      format="%,d원"),
+    "잔금":         st.column_config.NumberColumn("잔금",         format="%,d원"),
+    "승인추가금액": st.column_config.NumberColumn("승인추가금액", format="%,d원"),
+}
+
+
 # -----------------------------
 # 사이드바: 현장 선택/추가
 # -----------------------------
@@ -395,12 +376,22 @@ with st.sidebar.expander("➕ 새 현장 추가", expanded=False):
         new_name = st.text_input("프로젝트명", "수영 상가 인테리어")
         new_address = st.text_input("현장주소", "부산 수영구 ○○로")
         new_client = st.text_input("고객명", "고객명")
-        new_amount = currency_input("총 공사대금", 30000000, key="new_amount")
-        new_deposit = currency_input("계약금", 6000000, key="new_deposit")
-        new_first = currency_input("1차 지급", 6000000, key="new_first")
-        new_second = currency_input("2차 지급", 6000000, key="new_second")
-        new_third = currency_input("3차 지급", 6000000, key="new_third")
-        new_balance = currency_input("잔금", 6000000, key="new_balance")
+
+        # ── PATCH 1: number_input 아래 format_currency 캡션 추가 ──
+        new_amount = st.number_input("총 공사대금", min_value=0, value=30000000, step=1000000, format="%d")
+        st.caption(f"입력값: {format_currency(new_amount)}")
+        new_deposit = st.number_input("계약금", min_value=0, value=6000000, step=1000000, format="%d")
+        st.caption(f"입력값: {format_currency(new_deposit)}")
+        new_first = st.number_input("1차 지급", min_value=0, value=6000000, step=1000000, format="%d")
+        st.caption(f"입력값: {format_currency(new_first)}")
+        new_second = st.number_input("2차 지급", min_value=0, value=6000000, step=1000000, format="%d")
+        st.caption(f"입력값: {format_currency(new_second)}")
+        new_third = st.number_input("3차 지급", min_value=0, value=6000000, step=1000000, format="%d")
+        st.caption(f"입력값: {format_currency(new_third)}")
+        new_balance = st.number_input("잔금", min_value=0, value=6000000, step=1000000, format="%d")
+        st.caption(f"입력값: {format_currency(new_balance)}")
+        # ── PATCH 1 end ──
+
         new_start = st.date_input("공사시작일", datetime.now().date())
         new_duration = st.slider("예상공사기간(일)", 7, 120, 30)
         new_pm = st.text_input("PM", "박민서")
@@ -548,11 +539,15 @@ tab0, tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
 # -----------------------------
 with tab0:
     st.subheader("전체 현장 요약")
-    summary_display_df = format_money_columns(
+
+    # ── PATCH 2: summary_df 테이블에 금액 컬럼 천단위 포맷 적용 ──
+    st.dataframe(
         summary_df,
-        ["총공사대금", "총 공사대금", "계약금", "1차지급", "1차 지급", "2차지급", "2차 지급", "3차지급", "3차 지급", "잔금", "승인추가금액", "승인 추가금액"],
+        use_container_width=True,
+        hide_index=True,
+        column_config=MONEY_COL_CONFIG,
     )
-    st.dataframe(summary_display_df, use_container_width=True, hide_index=True)
+    # ── PATCH 2 end ──
 
     if not summary_df.empty:
         fig_all = px.bar(summary_df, x="프로젝트명", y="진행률", color="상태", text="진행률", hover_data=["PM", "미처리이슈", "미승인추가공사"])
@@ -564,12 +559,22 @@ with tab0:
         edit_name = st.text_input("프로젝트명", project_name)
         edit_address = st.text_input("현장주소", site_address)
         edit_client = st.text_input("고객명", client_name)
-        edit_amount = currency_input("총 공사대금", contract_amount, key="edit_amount")
-        edit_deposit = currency_input("계약금", deposit_amount, key="edit_deposit")
-        edit_first = currency_input("1차 지급", first_payment, key="edit_first")
-        edit_second = currency_input("2차 지급", second_payment, key="edit_second")
-        edit_third = currency_input("3차 지급", third_payment, key="edit_third")
-        edit_balance = currency_input("잔금", balance_amount, key="edit_balance")
+
+        # ── PATCH 1 (탭0 편집 폼): number_input 아래 format_currency 캡션 추가 ──
+        edit_amount = st.number_input("총 공사대금", min_value=0, value=contract_amount, step=1000000, format="%d")
+        st.caption(f"입력값: {format_currency(edit_amount)}")
+        edit_deposit = st.number_input("계약금", min_value=0, value=deposit_amount, step=1000000, format="%d")
+        st.caption(f"입력값: {format_currency(edit_deposit)}")
+        edit_first = st.number_input("1차 지급", min_value=0, value=first_payment, step=1000000, format="%d")
+        st.caption(f"입력값: {format_currency(edit_first)}")
+        edit_second = st.number_input("2차 지급", min_value=0, value=second_payment, step=1000000, format="%d")
+        st.caption(f"입력값: {format_currency(edit_second)}")
+        edit_third = st.number_input("3차 지급", min_value=0, value=third_payment, step=1000000, format="%d")
+        st.caption(f"입력값: {format_currency(edit_third)}")
+        edit_balance = st.number_input("잔금", min_value=0, value=balance_amount, step=1000000, format="%d")
+        st.caption(f"입력값: {format_currency(edit_balance)}")
+        # ── PATCH 1 end ──
+
         st.caption(f"지급단계 합계: {format_currency(edit_deposit + edit_first + edit_second + edit_third + edit_balance)}")
         edit_start = st.date_input("공사시작일", start_date)
         edit_duration = st.number_input("예상공사기간", min_value=1, value=expected_duration, step=1)
@@ -789,7 +794,13 @@ with tab5:
         c1, c2, c3 = st.columns(3)
         co_process = c1.selectbox("공정", process_options, key="co_process")
         requester = c2.selectbox("요청자", ["고객", "시공자", "협력업체", "기타"])
+
+        # ── PATCH 1 (탭5 추가공사 폼): 추가금액 입력 아래 캡션 추가 ──
         amount = c3.number_input("추가금액", min_value=0, value=0, step=100000, format="%d")
+        # c3 안에서는 st.caption 레이아웃이 깨질 수 있어 별도 행으로 표시
+        st.caption(f"추가금액 입력값: {format_currency(amount)}")
+        # ── PATCH 1 end ──
+
         change_content = st.text_area("변경내용")
         c4, c5, c6 = st.columns(3)
         approval_status = c4.selectbox("승인상태", ["대기", "승인", "거절", "보류"])
@@ -825,7 +836,17 @@ with tab5:
     if not project_changes.empty:
         total_approved = pd.to_numeric(project_changes.loc[project_changes["approval_status"] == "승인", "amount"], errors="coerce").fillna(0).sum()
         st.metric("승인된 추가공사 합계", format_currency(total_approved))
-    st.dataframe(display_changes(project_changes), use_container_width=True, hide_index=True)
+
+    # ── PATCH 2: 추가공사 목록 테이블 추가금액 천단위 포맷 적용 ──
+    st.dataframe(
+        display_changes(project_changes),
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "추가금액": st.column_config.NumberColumn("추가금액", format="%,d원"),
+        },
+    )
+    # ── PATCH 2 end ──
 
 
 # -----------------------------
