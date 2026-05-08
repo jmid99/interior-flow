@@ -75,6 +75,14 @@ def to_int(value, default=0):
         return default
 
 
+def format_currency(value):
+    """금액을 1,000원 단위 콤마가 포함된 원화 문자열로 변환합니다."""
+    try:
+        return f"{int(value):,}원"
+    except Exception:
+        return "0원"
+
+
 def to_date_str(value):
     if value in [None, "", pd.NaT]:
         return None
@@ -168,6 +176,11 @@ def create_default_project_if_empty():
             "address": "부산 해운대구 ○○동",
             "client_name": "홍길동",
             "contract_amount": 50000000,
+            "deposit_amount": 10000000,
+            "first_payment": 10000000,
+            "second_payment": 10000000,
+            "third_payment": 10000000,
+            "balance_amount": 10000000,
             "start_date": str(today),
             "duration_days": 45,
             "status": "진행중",
@@ -212,7 +225,12 @@ def display_projects(df):
             "name": "프로젝트명",
             "address": "현장주소",
             "client_name": "고객명",
-            "contract_amount": "계약금액",
+            "contract_amount": "총계약금액",
+            "deposit_amount": "계약금",
+            "first_payment": "1차지급",
+            "second_payment": "2차지급",
+            "third_payment": "3차지급",
+            "balance_amount": "잔금",
             "start_date": "공사시작일",
             "duration_days": "예상공사기간",
             "status": "상태",
@@ -342,7 +360,12 @@ with st.sidebar.expander("➕ 새 현장 추가", expanded=False):
         new_name = st.text_input("프로젝트명", "수영 상가 인테리어")
         new_address = st.text_input("현장주소", "부산 수영구 ○○로")
         new_client = st.text_input("고객명", "고객명")
-        new_amount = st.number_input("계약금액", min_value=0, value=30000000, step=1000000, format="%d")
+        new_amount = st.number_input("총 계약금액", min_value=0, value=30000000, step=1000000, format="%d")
+        new_deposit = st.number_input("계약금", min_value=0, value=6000000, step=1000000, format="%d")
+        new_first = st.number_input("1차 지급", min_value=0, value=6000000, step=1000000, format="%d")
+        new_second = st.number_input("2차 지급", min_value=0, value=6000000, step=1000000, format="%d")
+        new_third = st.number_input("3차 지급", min_value=0, value=6000000, step=1000000, format="%d")
+        new_balance = st.number_input("잔금", min_value=0, value=6000000, step=1000000, format="%d")
         new_start = st.date_input("공사시작일", datetime.now().date())
         new_duration = st.slider("예상공사기간(일)", 7, 120, 30)
         new_pm = st.text_input("PM", "박민서")
@@ -358,6 +381,11 @@ with st.sidebar.expander("➕ 새 현장 추가", expanded=False):
                         "address": new_address,
                         "client_name": new_client,
                         "contract_amount": int(new_amount),
+                        "deposit_amount": int(new_deposit),
+                        "first_payment": int(new_first),
+                        "second_payment": int(new_second),
+                        "third_payment": int(new_third),
+                        "balance_amount": int(new_balance),
                         "start_date": str(new_start),
                         "duration_days": int(new_duration),
                         "status": "진행중",
@@ -385,6 +413,11 @@ project_name = str(selected_project.get("name", ""))
 site_address = str(selected_project.get("address", ""))
 client_name = str(selected_project.get("client_name", ""))
 contract_amount = to_int(selected_project.get("contract_amount", 0))
+deposit_amount = to_int(selected_project.get("deposit_amount", 0))
+first_payment = to_int(selected_project.get("first_payment", 0))
+second_payment = to_int(selected_project.get("second_payment", 0))
+third_payment = to_int(selected_project.get("third_payment", 0))
+balance_amount = to_int(selected_project.get("balance_amount", 0))
 start_date = safe_date(selected_project.get("start_date"))
 expected_duration = to_int(selected_project.get("duration_days", 45), 45)
 expected_end_date = start_date + timedelta(days=expected_duration)
@@ -414,6 +447,12 @@ def calculate_summary(projects, tasks, issues, changes):
                 "미처리이슈": open_issues,
                 "미승인추가공사": pending_changes,
                 "승인추가금액": approved_amount,
+                "총계약금액": to_int(p.get("contract_amount", 0)),
+                "계약금": to_int(p.get("deposit_amount", 0)),
+                "1차지급": to_int(p.get("first_payment", 0)),
+                "2차지급": to_int(p.get("second_payment", 0)),
+                "3차지급": to_int(p.get("third_payment", 0)),
+                "잔금": to_int(p.get("balance_amount", 0)),
                 "고객명": p.get("client_name", ""),
                 "현장주소": p.get("address", ""),
             }
@@ -449,7 +488,13 @@ col5.metric("미승인 추가공사", f"{pending_change_count}건")
 
 st.info(
     f"현재 현장: {project_name} / 주소: {site_address} / 고객: {client_name} / "
-    f"계약금액: {contract_amount:,}원 / 예정 준공일: {expected_end_date} / 남은 예정일: {remaining_days}일"
+    f"총 계약금액: {format_currency(contract_amount)} / "
+    f"계약금: {format_currency(deposit_amount)} / "
+    f"1차 지급: {format_currency(first_payment)} / "
+    f"2차 지급: {format_currency(second_payment)} / "
+    f"3차 지급: {format_currency(third_payment)} / "
+    f"잔금: {format_currency(balance_amount)} / "
+    f"예정 준공일: {expected_end_date} / 남은 예정일: {remaining_days}일"
 )
 
 st.divider()
@@ -480,7 +525,13 @@ with tab0:
         edit_name = st.text_input("프로젝트명", project_name)
         edit_address = st.text_input("현장주소", site_address)
         edit_client = st.text_input("고객명", client_name)
-        edit_amount = st.number_input("계약금액", min_value=0, value=contract_amount, step=1000000, format="%d")
+        edit_amount = st.number_input("총 계약금액", min_value=0, value=contract_amount, step=1000000, format="%d")
+        edit_deposit = st.number_input("계약금", min_value=0, value=deposit_amount, step=1000000, format="%d")
+        edit_first = st.number_input("1차 지급", min_value=0, value=first_payment, step=1000000, format="%d")
+        edit_second = st.number_input("2차 지급", min_value=0, value=second_payment, step=1000000, format="%d")
+        edit_third = st.number_input("3차 지급", min_value=0, value=third_payment, step=1000000, format="%d")
+        edit_balance = st.number_input("잔금", min_value=0, value=balance_amount, step=1000000, format="%d")
+        st.caption(f"지급단계 합계: {format_currency(edit_deposit + edit_first + edit_second + edit_third + edit_balance)}")
         edit_start = st.date_input("공사시작일", start_date)
         edit_duration = st.number_input("예상공사기간", min_value=1, value=expected_duration, step=1)
         edit_status = st.selectbox("상태", ["준비중", "진행중", "보류", "완료", "취소"], index=["준비중", "진행중", "보류", "완료", "취소"].index(str(selected_project.get("status", "진행중"))) if str(selected_project.get("status", "진행중")) in ["준비중", "진행중", "보류", "완료", "취소"] else 1)
@@ -498,6 +549,11 @@ with tab0:
                         "address": edit_address,
                         "client_name": edit_client,
                         "contract_amount": int(edit_amount),
+                        "deposit_amount": int(edit_deposit),
+                        "first_payment": int(edit_first),
+                        "second_payment": int(edit_second),
+                        "third_payment": int(edit_third),
+                        "balance_amount": int(edit_balance),
                         "start_date": str(edit_start),
                         "duration_days": int(edit_duration),
                         "status": edit_status,
