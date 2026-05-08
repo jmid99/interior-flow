@@ -101,24 +101,35 @@ def parse_currency(value):
         return 0
 
 
-def currency_input(label, value=0, key=None):
+def normalize_currency_input(key):
+    """금액 입력 후 Enter/Tab 등으로 값이 확정되면 50,000,000원 형식으로 정리합니다."""
+    st.session_state[key] = format_currency(st.session_state.get(key, "0"))
+
+
+def currency_input(label, value=0, key=None, use_callback=False):
     """금액 입력칸입니다.
 
-    주의: Streamlit form 내부에서는 text_input의 on_change 콜백을 사용할 수 없습니다.
-    그래서 입력칸 자체는 숫자 입력을 허용하고, 저장·재실행 후 화면 표시 영역과 요약표에서
-    50,000,000원 형태로 포맷합니다.
+    - form 밖에서는 use_callback=True로 사용하면 Enter/Tab 후 콤마와 '원'이 자동 반영됩니다.
+    - form 안에서는 Streamlit 제약 때문에 콜백을 쓰지 않습니다.
     """
     if key is None:
         key = f"currency_{label}"
 
-    if key not in st.session_state:
+    current_db_value_key = f"{key}_db_value"
+    if st.session_state.get(current_db_value_key) != value:
         st.session_state[key] = format_currency(value)
+        st.session_state[current_db_value_key] = value
 
-    text_value = st.text_input(
-        label,
-        key=key,
-        help="숫자만 입력해도 됩니다. 예: 50000000 또는 50,000,000원",
-    )
+    kwargs = {
+        "label": label,
+        "key": key,
+        "help": "숫자만 입력해도 됩니다. 예: 50000000 또는 50,000,000원. 입력 후 Enter 또는 Tab을 누르면 정리됩니다.",
+    }
+    if use_callback:
+        kwargs["on_change"] = normalize_currency_input
+        kwargs["args"] = (key,)
+
+    text_value = st.text_input(**kwargs)
     return parse_currency(text_value)
 
 
@@ -575,50 +586,66 @@ with tab0:
         st.plotly_chart(fig_all, use_container_width=True)
 
     st.subheader("선택 현장 기본정보 수정")
-    with st.form("edit_project_form"):
-        edit_name = st.text_input("프로젝트명", project_name)
-        edit_address = st.text_input("현장주소", site_address)
-        edit_client = st.text_input("고객명", client_name)
-        edit_amount = currency_input("총 공사대금", contract_amount, key="edit_amount")
-        edit_deposit = currency_input("계약금", deposit_amount, key="edit_deposit")
-        edit_first = currency_input("1차 지급", first_payment, key="edit_first")
-        edit_second = currency_input("2차 지급", second_payment, key="edit_second")
-        edit_third = currency_input("3차 지급", third_payment, key="edit_third")
-        edit_balance = currency_input("잔금", balance_amount, key="edit_balance")
-        st.caption(f"지급단계 합계: {format_currency(edit_deposit + edit_first + edit_second + edit_third + edit_balance)}")
-        edit_start = st.date_input("공사시작일", start_date)
-        edit_duration = st.number_input("예상공사기간", min_value=1, value=expected_duration, step=1)
-        edit_status = st.selectbox("상태", ["준비중", "진행중", "보류", "완료", "취소"], index=["준비중", "진행중", "보류", "완료", "취소"].index(str(selected_project.get("status", "진행중"))) if str(selected_project.get("status", "진행중")) in ["준비중", "진행중", "보류", "완료", "취소"] else 1)
-        edit_pm = st.text_input("PM", str(selected_project.get("pm", "")))
-        edit_memo = st.text_area("메모", str(selected_project.get("memo", "")))
-        save_project = st.form_submit_button("💾 선택 현장 기본정보 저장")
+    # Streamlit form 내부에서는 입력 중간값이 즉시 반영되지 않아 지급단계 합계가 늦게 갱신됩니다.
+    # 따라서 기본정보 수정 영역은 form을 쓰지 않고, 일반 입력 위젯 + 저장 버튼 방식으로 구성합니다.
+    edit_name = st.text_input("프로젝트명", project_name, key=f"edit_name_{selected_project_id}")
+    edit_address = st.text_input("현장주소", site_address, key=f"edit_address_{selected_project_id}")
+    edit_client = st.text_input("고객명", client_name, key=f"edit_client_{selected_project_id}")
 
-        if save_project:
-            try:
-                sb_update(
-                    "projects",
-                    selected_project_id,
-                    {
-                        "name": edit_name,
-                        "address": edit_address,
-                        "client_name": edit_client,
-                        "contract_amount": int(edit_amount),
-                        "deposit_amount": int(edit_deposit),
-                        "first_payment": int(edit_first),
-                        "second_payment": int(edit_second),
-                        "third_payment": int(edit_third),
-                        "balance_amount": int(edit_balance),
-                        "start_date": str(edit_start),
-                        "duration_days": int(edit_duration),
-                        "status": edit_status,
-                        "pm": edit_pm,
-                        "memo": edit_memo,
-                    },
-                )
-                st.success("현장 기본정보가 저장되었습니다.")
-                st.rerun()
-            except Exception as e:
-                st.error(f"저장 실패: {e}")
+    edit_amount = currency_input("총 공사대금", contract_amount, key=f"edit_amount_{selected_project_id}", use_callback=True)
+    edit_deposit = currency_input("계약금", deposit_amount, key=f"edit_deposit_{selected_project_id}", use_callback=True)
+    edit_first = currency_input("1차 지급", first_payment, key=f"edit_first_{selected_project_id}", use_callback=True)
+    edit_second = currency_input("2차 지급", second_payment, key=f"edit_second_{selected_project_id}", use_callback=True)
+    edit_third = currency_input("3차 지급", third_payment, key=f"edit_third_{selected_project_id}", use_callback=True)
+    edit_balance = currency_input("잔금", balance_amount, key=f"edit_balance_{selected_project_id}", use_callback=True)
+
+    payment_sum = edit_deposit + edit_first + edit_second + edit_third + edit_balance
+    st.caption(f"지급단계 합계: {format_currency(payment_sum)}")
+    if payment_sum != edit_amount:
+        diff = edit_amount - payment_sum
+        st.warning(f"총 공사대금과 지급단계 합계가 다릅니다. 차액: {format_currency(diff)}")
+    else:
+        st.success("총 공사대금과 지급단계 합계가 일치합니다.")
+
+    edit_start = st.date_input("공사시작일", start_date, key=f"edit_start_{selected_project_id}")
+    edit_duration = st.number_input("예상공사기간", min_value=1, value=expected_duration, step=1, key=f"edit_duration_{selected_project_id}")
+    status_options = ["준비중", "진행중", "보류", "완료", "취소"]
+    current_status = str(selected_project.get("status", "진행중"))
+    edit_status = st.selectbox(
+        "상태",
+        status_options,
+        index=status_options.index(current_status) if current_status in status_options else 1,
+        key=f"edit_status_{selected_project_id}",
+    )
+    edit_pm = st.text_input("PM", str(selected_project.get("pm", "")), key=f"edit_pm_{selected_project_id}")
+    edit_memo = st.text_area("메모", str(selected_project.get("memo", "")), key=f"edit_memo_{selected_project_id}")
+
+    if st.button("💾 선택 현장 기본정보 저장", key=f"save_project_{selected_project_id}"):
+        try:
+            sb_update(
+                "projects",
+                selected_project_id,
+                {
+                    "name": edit_name,
+                    "address": edit_address,
+                    "client_name": edit_client,
+                    "contract_amount": int(edit_amount),
+                    "deposit_amount": int(edit_deposit),
+                    "first_payment": int(edit_first),
+                    "second_payment": int(edit_second),
+                    "third_payment": int(edit_third),
+                    "balance_amount": int(edit_balance),
+                    "start_date": str(edit_start),
+                    "duration_days": int(edit_duration),
+                    "status": edit_status,
+                    "pm": edit_pm,
+                    "memo": edit_memo,
+                },
+            )
+            st.success("현장 기본정보가 Supabase에 저장되었습니다.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"저장 실패: {e}")
 
 
 # -----------------------------
