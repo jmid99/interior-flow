@@ -80,9 +80,42 @@ def format_currency(value):
     try:
         if value is None or value == "":
             return "0원"
-        return format(int(float(value)), ',') + '원'
+        cleaned = str(value).replace(",", "").replace("원", "").strip()
+        if cleaned == "":
+            return "0원"
+        return f"{int(float(cleaned)):,}원"
     except Exception:
         return "0원"
+
+
+def parse_currency(value):
+    """50,000,000원 또는 50000000 형태의 입력값을 정수로 변환합니다."""
+    try:
+        if value is None or value == "":
+            return 0
+        cleaned = str(value).replace(",", "").replace("원", "").strip()
+        if cleaned == "":
+            return 0
+        return int(float(cleaned))
+    except Exception:
+        return 0
+
+
+def currency_input(label, value=0, key=None):
+    """Streamlit number_input 대신 콤마가 보이는 금액 입력칸을 제공합니다."""
+    text_value = st.text_input(label, value=format_currency(value), key=key)
+    return parse_currency(text_value)
+
+
+def format_money_columns(df, columns):
+    """데이터프레임의 금액 컬럼을 콤마 포함 원화 문자열로 변환합니다."""
+    if df is None or df.empty:
+        return df
+    result = df.copy()
+    for col in columns:
+        if col in result.columns:
+            result[col] = result[col].apply(format_currency)
+    return result
 
 
 def to_date_str(value):
@@ -362,12 +395,12 @@ with st.sidebar.expander("➕ 새 현장 추가", expanded=False):
         new_name = st.text_input("프로젝트명", "수영 상가 인테리어")
         new_address = st.text_input("현장주소", "부산 수영구 ○○로")
         new_client = st.text_input("고객명", "고객명")
-        new_amount = st.number_input("총 공사대금", min_value=0, value=30000000, step=1000000, format="%d")
-        new_deposit = st.number_input("계약금", min_value=0, value=6000000, step=1000000, format="%d")
-        new_first = st.number_input("1차 지급", min_value=0, value=6000000, step=1000000, format="%d")
-        new_second = st.number_input("2차 지급", min_value=0, value=6000000, step=1000000, format="%d")
-        new_third = st.number_input("3차 지급", min_value=0, value=6000000, step=1000000, format="%d")
-        new_balance = st.number_input("잔금", min_value=0, value=6000000, step=1000000, format="%d")
+        new_amount = currency_input("총 공사대금", 30000000, key="new_amount")
+        new_deposit = currency_input("계약금", 6000000, key="new_deposit")
+        new_first = currency_input("1차 지급", 6000000, key="new_first")
+        new_second = currency_input("2차 지급", 6000000, key="new_second")
+        new_third = currency_input("3차 지급", 6000000, key="new_third")
+        new_balance = currency_input("잔금", 6000000, key="new_balance")
         new_start = st.date_input("공사시작일", datetime.now().date())
         new_duration = st.slider("예상공사기간(일)", 7, 120, 30)
         new_pm = st.text_input("PM", "박민서")
@@ -515,7 +548,11 @@ tab0, tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
 # -----------------------------
 with tab0:
     st.subheader("전체 현장 요약")
-    st.dataframe(summary_df, use_container_width=True, hide_index=True)
+    summary_display_df = format_money_columns(
+        summary_df,
+        ["총공사대금", "총 공사대금", "계약금", "1차지급", "1차 지급", "2차지급", "2차 지급", "3차지급", "3차 지급", "잔금", "승인추가금액", "승인 추가금액"],
+    )
+    st.dataframe(summary_display_df, use_container_width=True, hide_index=True)
 
     if not summary_df.empty:
         fig_all = px.bar(summary_df, x="프로젝트명", y="진행률", color="상태", text="진행률", hover_data=["PM", "미처리이슈", "미승인추가공사"])
@@ -527,12 +564,12 @@ with tab0:
         edit_name = st.text_input("프로젝트명", project_name)
         edit_address = st.text_input("현장주소", site_address)
         edit_client = st.text_input("고객명", client_name)
-        edit_amount = st.number_input("총 공사대금", min_value=0, value=contract_amount, step=1000000, format="%d")
-        edit_deposit = st.number_input("계약금", min_value=0, value=deposit_amount, step=1000000, format="%d")
-        edit_first = st.number_input("1차 지급", min_value=0, value=first_payment, step=1000000, format="%d")
-        edit_second = st.number_input("2차 지급", min_value=0, value=second_payment, step=1000000, format="%d")
-        edit_third = st.number_input("3차 지급", min_value=0, value=third_payment, step=1000000, format="%d")
-        edit_balance = st.number_input("잔금", min_value=0, value=balance_amount, step=1000000, format="%d")
+        edit_amount = currency_input("총 공사대금", contract_amount, key="edit_amount")
+        edit_deposit = currency_input("계약금", deposit_amount, key="edit_deposit")
+        edit_first = currency_input("1차 지급", first_payment, key="edit_first")
+        edit_second = currency_input("2차 지급", second_payment, key="edit_second")
+        edit_third = currency_input("3차 지급", third_payment, key="edit_third")
+        edit_balance = currency_input("잔금", balance_amount, key="edit_balance")
         st.caption(f"지급단계 합계: {format_currency(edit_deposit + edit_first + edit_second + edit_third + edit_balance)}")
         edit_start = st.date_input("공사시작일", start_date)
         edit_duration = st.number_input("예상공사기간", min_value=1, value=expected_duration, step=1)
