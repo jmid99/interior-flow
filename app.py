@@ -78,7 +78,9 @@ def to_int(value, default=0):
 def format_currency(value):
     """금액을 1,000원 단위 콤마가 포함된 원화 문자열로 변환합니다."""
     try:
-        return f"{int(value):,}원"
+        if value is None or value == "":
+            return "0원"
+        return format(int(float(value)), ',') + '원'
     except Exception:
         return "0원"
 
@@ -360,7 +362,7 @@ with st.sidebar.expander("➕ 새 현장 추가", expanded=False):
         new_name = st.text_input("프로젝트명", "수영 상가 인테리어")
         new_address = st.text_input("현장주소", "부산 수영구 ○○로")
         new_client = st.text_input("고객명", "고객명")
-        new_amount = st.number_input("총 계약금액", min_value=0, value=30000000, step=1000000, format="%d")
+        new_amount = st.number_input("총 공사대금", min_value=0, value=30000000, step=1000000, format="%d")
         new_deposit = st.number_input("계약금", min_value=0, value=6000000, step=1000000, format="%d")
         new_first = st.number_input("1차 지급", min_value=0, value=6000000, step=1000000, format="%d")
         new_second = st.number_input("2차 지급", min_value=0, value=6000000, step=1000000, format="%d")
@@ -488,7 +490,7 @@ col5.metric("미승인 추가공사", f"{pending_change_count}건")
 
 st.info(
     f"현재 현장: {project_name} / 주소: {site_address} / 고객: {client_name} / "
-    f"총 계약금액: {format_currency(contract_amount)} / "
+    f"총 공사대금: {format_currency(contract_amount)} / "
     f"계약금: {format_currency(deposit_amount)} / "
     f"1차 지급: {format_currency(first_payment)} / "
     f"2차 지급: {format_currency(second_payment)} / "
@@ -525,7 +527,7 @@ with tab0:
         edit_name = st.text_input("프로젝트명", project_name)
         edit_address = st.text_input("현장주소", site_address)
         edit_client = st.text_input("고객명", client_name)
-        edit_amount = st.number_input("총 계약금액", min_value=0, value=contract_amount, step=1000000, format="%d")
+        edit_amount = st.number_input("총 공사대금", min_value=0, value=contract_amount, step=1000000, format="%d")
         edit_deposit = st.number_input("계약금", min_value=0, value=deposit_amount, step=1000000, format="%d")
         edit_first = st.number_input("1차 지급", min_value=0, value=first_payment, step=1000000, format="%d")
         edit_second = st.number_input("2차 지급", min_value=0, value=second_payment, step=1000000, format="%d")
@@ -785,7 +787,7 @@ with tab5:
     st.subheader("선택 현장 추가공사 목록")
     if not project_changes.empty:
         total_approved = pd.to_numeric(project_changes.loc[project_changes["approval_status"] == "승인", "amount"], errors="coerce").fillna(0).sum()
-        st.metric("승인된 추가공사 합계", f"{int(total_approved):,}원")
+        st.metric("승인된 추가공사 합계", format_currency(total_approved))
     st.dataframe(display_changes(project_changes), use_container_width=True, hide_index=True)
 
 
