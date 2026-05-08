@@ -80,60 +80,9 @@ def format_currency(value):
     try:
         if value is None or value == "":
             return "0원"
-        cleaned = str(value).replace(",", "").replace("원", "").strip()
-        if cleaned == "":
-            return "0원"
-        return f"{int(float(cleaned)):,}원"
+        return format(int(float(value)), ',') + '원'
     except Exception:
         return "0원"
-
-
-def parse_currency(value):
-    """50,000,000원 또는 50000000 형태의 입력값을 정수로 변환합니다."""
-    try:
-        if value is None or value == "":
-            return 0
-        cleaned = str(value).replace(",", "").replace("원", "").strip()
-        if cleaned == "":
-            return 0
-        return int(float(cleaned))
-    except Exception:
-        return 0
-
-
-def normalize_currency_input(key):
-    """금액 입력칸에서 Tab/Enter/포커스 이동 시 50,000,000원 형태로 자동 정리합니다."""
-    current_value = st.session_state.get(key, "0")
-    st.session_state[key] = format_currency(current_value)
-
-
-def currency_input(label, value=0, key=None):
-    """숫자를 입력한 뒤 Tab/Enter를 누르면 콤마와 '원'이 자동 적용되는 금액 입력칸입니다."""
-    if key is None:
-        key = f"currency_{label}"
-
-    if key not in st.session_state:
-        st.session_state[key] = format_currency(value)
-
-    st.text_input(
-        label,
-        key=key,
-        on_change=normalize_currency_input,
-        args=(key,),
-        help="숫자만 입력해도 됩니다. 입력 후 Tab 또는 Enter를 누르면 50,000,000원 형태로 자동 정리됩니다.",
-    )
-    return parse_currency(st.session_state.get(key, "0"))
-
-
-def format_money_columns(df, columns):
-    """데이터프레임의 금액 컬럼을 콤마 포함 원화 문자열로 변환합니다."""
-    if df is None or df.empty:
-        return df
-    result = df.copy()
-    for col in columns:
-        if col in result.columns:
-            result[col] = result[col].apply(format_currency)
-    return result
 
 
 def to_date_str(value):
@@ -155,6 +104,73 @@ def safe_date(value, default=None):
         return parsed.date()
     except Exception:
         return default
+
+
+# -------------------------------------------------------
+# money_input
+# Tab(또는 Enter) 시 천단위 콤마가 자동 적용되는 금액 입력 위젯.
+#
+# 핵심 원리:
+#   st.form 내부에서는 on_change가 폼 제출 시점에만 실행되므로
+#   탭 시 즉시 콤마가 적용되려면 st.form 바깥에서 사용해야 합니다.
+#   이 앱의 모든 금액 입력 폼은 st.form 대신 st.container를 사용합니다.
+# -------------------------------------------------------
+def money_input(label: str, key: str, default_value: int = 0, help: str = None) -> int:
+    """
+    탭(또는 Enter) 시 천단위 콤마 자동 적용 금액 입력 위젯.
+    반환값: 정수(콤마·원 기호 제거 후 int).
+    """
+    if key not in st.session_state:
+        st.session_state[key] = f"{int(default_value):,}"
+
+    def _reformat():
+        raw = st.session_state[key].replace(",", "").replace("원", "").strip()
+        try:
+            val = int(float(raw)) if raw else 0
+        except Exception:
+            val = 0
+        st.session_state[key] = f"{val:,}"
+
+    st.text_input(label, key=key, on_change=_reformat, help=help)
+
+    raw = st.session_state.get(key, "0").replace(",", "").strip()
+    try:
+        return int(float(raw)) if raw else 0
+    except Exception:
+        return 0
+
+
+def _reset_new_proj_form():
+    """새 현장 추가 폼 초기화"""
+    resets = {
+        "new_proj_name":    "수영 상가 인테리어",
+        "new_proj_address": "부산 수영구 ○○로",
+        "new_proj_client":  "고객명",
+        "new_proj_pm":      "박민서",
+        "new_proj_memo":    "",
+        "new_proj_amount":  "30,000,000",
+        "new_proj_deposit": "6,000,000",
+        "new_proj_first":   "6,000,000",
+        "new_proj_second":  "6,000,000",
+        "new_proj_third":   "6,000,000",
+        "new_proj_balance": "6,000,000",
+    }
+    for k, v in resets.items():
+        st.session_state[k] = v
+
+
+# -------------------------------------------------------
+# 금액 컬럼용 column_config (dataframe/data_editor 공용)
+# -------------------------------------------------------
+MONEY_COL_CONFIG = {
+    "총계약금액":   st.column_config.NumberColumn("총계약금액",   format="%,d원"),
+    "계약금":       st.column_config.NumberColumn("계약금",       format="%,d원"),
+    "1차지급":      st.column_config.NumberColumn("1차지급",      format="%,d원"),
+    "2차지급":      st.column_config.NumberColumn("2차지급",      format="%,d원"),
+    "3차지급":      st.column_config.NumberColumn("3차지급",      format="%,d원"),
+    "잔금":         st.column_config.NumberColumn("잔금",         format="%,d원"),
+    "승인추가금액": st.column_config.NumberColumn("승인추가금액", format="%,d원"),
+}
 
 
 # -----------------------------
@@ -394,9 +410,10 @@ def task_values_from_display(row):
     }
 
 
-# -----------------------------
-# 사이드바: 현장 선택/추가
-# -----------------------------
+# ================================================================
+# 사이드바: 현장 선택 / 새 현장 추가
+# st.form 제거 → money_input on_change가 탭 시 즉시 실행
+# ================================================================
 st.sidebar.header("현장 관리")
 
 if projects_df.empty:
@@ -409,71 +426,84 @@ selected_project_id = project_options[selected_label]
 selected_project = projects_df[projects_df["id"] == selected_project_id].iloc[0]
 
 with st.sidebar.expander("➕ 새 현장 추가", expanded=False):
-    with st.form("new_project_form", clear_on_submit=True):
-        new_name = st.text_input("프로젝트명", "수영 상가 인테리어")
-        new_address = st.text_input("현장주소", "부산 수영구 ○○로")
-        new_client = st.text_input("고객명", "고객명")
-        new_amount = currency_input("총 공사대금", 30000000, key="new_amount")
-        new_deposit = currency_input("계약금", 6000000, key="new_deposit")
-        new_first = currency_input("1차 지급", 6000000, key="new_first")
-        new_second = currency_input("2차 지급", 6000000, key="new_second")
-        new_third = currency_input("3차 지급", 6000000, key="new_third")
-        new_balance = currency_input("잔금", 6000000, key="new_balance")
-        new_start = st.date_input("공사시작일", datetime.now().date())
-        new_duration = st.slider("예상공사기간(일)", 7, 120, 30)
-        new_pm = st.text_input("PM", "박민서")
-        new_memo = st.text_area("메모")
-        create_project = st.form_submit_button("현장 추가")
+    new_name    = st.text_input("프로젝트명", key="new_proj_name",    value=st.session_state.get("new_proj_name",    "수영 상가 인테리어"))
+    new_address = st.text_input("현장주소",   key="new_proj_address", value=st.session_state.get("new_proj_address", "부산 수영구 ○○로"))
+    new_client  = st.text_input("고객명",     key="new_proj_client",  value=st.session_state.get("new_proj_client",  "고객명"))
 
-        if create_project:
-            try:
-                res = sb_insert(
-                    "projects",
-                    {
-                        "name": new_name,
-                        "address": new_address,
-                        "client_name": new_client,
-                        "contract_amount": int(new_amount),
-                        "deposit_amount": int(new_deposit),
-                        "first_payment": int(new_first),
-                        "second_payment": int(new_second),
-                        "third_payment": int(new_third),
-                        "balance_amount": int(new_balance),
-                        "start_date": str(new_start),
-                        "duration_days": int(new_duration),
-                        "status": "진행중",
-                        "pm": new_pm,
-                        "memo": new_memo,
-                    },
-                )
-                new_project_id = res.data[0]["id"]
-                supabase.table("tasks").insert(default_process_rows(new_project_id, new_start)).execute()
-                st.success("새 현장과 기본 공정표가 Supabase에 저장되었습니다.")
-                st.rerun()
-            except Exception as e:
-                st.error(f"현장 추가 실패: {e}")
+    new_amount  = money_input("총 공사대금", key="new_proj_amount",  default_value=30_000_000)
+    new_deposit = money_input("계약금",      key="new_proj_deposit", default_value=6_000_000)
+    new_first   = money_input("1차 지급",    key="new_proj_first",   default_value=6_000_000)
+    new_second  = money_input("2차 지급",    key="new_proj_second",  default_value=6_000_000)
+    new_third   = money_input("3차 지급",    key="new_proj_third",   default_value=6_000_000)
+    new_balance = money_input("잔금",        key="new_proj_balance", default_value=6_000_000)
+
+    st.caption(f"지급단계 합계: {format_currency(new_deposit + new_first + new_second + new_third + new_balance)}")
+
+    new_start    = st.date_input("공사시작일", datetime.now().date(), key="new_proj_start")
+    new_duration = st.slider("예상공사기간(일)", 7, 120, 30, key="new_proj_duration")
+    new_pm       = st.text_input("PM",  key="new_proj_pm",   value=st.session_state.get("new_proj_pm",   "박민서"))
+    new_memo     = st.text_area("메모", key="new_proj_memo", value=st.session_state.get("new_proj_memo", ""))
+
+    if st.button("현장 추가", key="btn_add_project"):
+        try:
+            res = sb_insert(
+                "projects",
+                {
+                    "name":            st.session_state.get("new_proj_name", ""),
+                    "address":         st.session_state.get("new_proj_address", ""),
+                    "client_name":     st.session_state.get("new_proj_client", ""),
+                    "contract_amount": new_amount,
+                    "deposit_amount":  new_deposit,
+                    "first_payment":   new_first,
+                    "second_payment":  new_second,
+                    "third_payment":   new_third,
+                    "balance_amount":  new_balance,
+                    "start_date":      str(new_start),
+                    "duration_days":   int(new_duration),
+                    "status":          "진행중",
+                    "pm":              st.session_state.get("new_proj_pm", ""),
+                    "memo":            st.session_state.get("new_proj_memo", ""),
+                },
+            )
+            new_project_id = res.data[0]["id"]
+            supabase.table("tasks").insert(default_process_rows(new_project_id, new_start)).execute()
+            st.success("새 현장과 기본 공정표가 Supabase에 저장되었습니다.")
+            _reset_new_proj_form()
+            st.rerun()
+        except Exception as e:
+            st.error(f"현장 추가 실패: {e}")
 
 
 # -----------------------------
 # 선택 현장 데이터
 # -----------------------------
-project_tasks = tasks_df[tasks_df["project_id"] == selected_project_id] if not tasks_df.empty else pd.DataFrame()
-project_issues = issues_df[issues_df["project_id"] == selected_project_id] if not issues_df.empty else pd.DataFrame()
+project_tasks   = tasks_df[tasks_df["project_id"] == selected_project_id]             if not tasks_df.empty        else pd.DataFrame()
+project_issues  = issues_df[issues_df["project_id"] == selected_project_id]           if not issues_df.empty       else pd.DataFrame()
 project_changes = change_orders_df[change_orders_df["project_id"] == selected_project_id] if not change_orders_df.empty else pd.DataFrame()
-project_photos = photos_df[photos_df["project_id"] == selected_project_id] if not photos_df.empty else pd.DataFrame()
+project_photos  = photos_df[photos_df["project_id"] == selected_project_id]           if not photos_df.empty       else pd.DataFrame()
 
-project_name = str(selected_project.get("name", ""))
-site_address = str(selected_project.get("address", ""))
-client_name = str(selected_project.get("client_name", ""))
-contract_amount = to_int(selected_project.get("contract_amount", 0))
-deposit_amount = to_int(selected_project.get("deposit_amount", 0))
-first_payment = to_int(selected_project.get("first_payment", 0))
-second_payment = to_int(selected_project.get("second_payment", 0))
-third_payment = to_int(selected_project.get("third_payment", 0))
-balance_amount = to_int(selected_project.get("balance_amount", 0))
-start_date = safe_date(selected_project.get("start_date"))
+project_name      = str(selected_project.get("name", ""))
+site_address      = str(selected_project.get("address", ""))
+client_name       = str(selected_project.get("client_name", ""))
+contract_amount   = to_int(selected_project.get("contract_amount", 0))
+deposit_amount    = to_int(selected_project.get("deposit_amount", 0))
+first_payment     = to_int(selected_project.get("first_payment", 0))
+second_payment    = to_int(selected_project.get("second_payment", 0))
+third_payment     = to_int(selected_project.get("third_payment", 0))
+balance_amount    = to_int(selected_project.get("balance_amount", 0))
+start_date        = safe_date(selected_project.get("start_date"))
 expected_duration = to_int(selected_project.get("duration_days", 45), 45)
 expected_end_date = start_date + timedelta(days=expected_duration)
+
+# 선택 현장이 바뀌면 편집 폼의 money_input 세션값을 DB 값으로 리셋
+if st.session_state.get("_edit_loaded_for") != selected_project_id:
+    st.session_state["edit_amount"]  = f"{contract_amount:,}"
+    st.session_state["edit_deposit"] = f"{deposit_amount:,}"
+    st.session_state["edit_first"]   = f"{first_payment:,}"
+    st.session_state["edit_second"]  = f"{second_payment:,}"
+    st.session_state["edit_third"]   = f"{third_payment:,}"
+    st.session_state["edit_balance"] = f"{balance_amount:,}"
+    st.session_state["_edit_loaded_for"] = selected_project_id
 
 
 # -----------------------------
@@ -483,31 +513,31 @@ def calculate_summary(projects, tasks, issues, changes):
     rows = []
     for _, p in projects.iterrows():
         pid = int(p["id"])
-        t = tasks[tasks["project_id"] == pid] if not tasks.empty else pd.DataFrame()
-        i = issues[issues["project_id"] == pid] if not issues.empty else pd.DataFrame()
+        t = tasks[tasks["project_id"] == pid]     if not tasks.empty   else pd.DataFrame()
+        i = issues[issues["project_id"] == pid]   if not issues.empty  else pd.DataFrame()
         c = changes[changes["project_id"] == pid] if not changes.empty else pd.DataFrame()
-        progress = int(pd.to_numeric(t["progress"], errors="coerce").fillna(0).mean()) if not t.empty else 0
-        open_issues = len(i[i["status"].isin(["접수", "처리중"])]) if not i.empty else 0
-        pending_changes = len(c[c["approval_status"] == "대기"]) if not c.empty else 0
+        progress        = int(pd.to_numeric(t["progress"], errors="coerce").fillna(0).mean()) if not t.empty else 0
+        open_issues     = len(i[i["status"].isin(["접수", "처리중"])])   if not i.empty else 0
+        pending_changes = len(c[c["approval_status"] == "대기"])         if not c.empty else 0
         approved_amount = int(pd.to_numeric(c.loc[c["approval_status"] == "승인", "amount"], errors="coerce").fillna(0).sum()) if not c.empty else 0
         rows.append(
             {
-                "프로젝트ID": pid,
-                "프로젝트명": p.get("name", ""),
-                "상태": p.get("status", ""),
-                "PM": p.get("pm", ""),
-                "진행률": progress,
-                "미처리이슈": open_issues,
+                "프로젝트ID":    pid,
+                "프로젝트명":    p.get("name", ""),
+                "상태":          p.get("status", ""),
+                "PM":            p.get("pm", ""),
+                "진행률":        progress,
+                "미처리이슈":    open_issues,
                 "미승인추가공사": pending_changes,
-                "승인추가금액": approved_amount,
-                "총계약금액": to_int(p.get("contract_amount", 0)),
-                "계약금": to_int(p.get("deposit_amount", 0)),
-                "1차지급": to_int(p.get("first_payment", 0)),
-                "2차지급": to_int(p.get("second_payment", 0)),
-                "3차지급": to_int(p.get("third_payment", 0)),
-                "잔금": to_int(p.get("balance_amount", 0)),
-                "고객명": p.get("client_name", ""),
-                "현장주소": p.get("address", ""),
+                "승인추가금액":  approved_amount,
+                "총계약금액":    to_int(p.get("contract_amount", 0)),
+                "계약금":        to_int(p.get("deposit_amount", 0)),
+                "1차지급":       to_int(p.get("first_payment", 0)),
+                "2차지급":       to_int(p.get("second_payment", 0)),
+                "3차지급":       to_int(p.get("third_payment", 0)),
+                "잔금":          to_int(p.get("balance_amount", 0)),
+                "고객명":        p.get("client_name", ""),
+                "현장주소":      p.get("address", ""),
             }
         )
     return pd.DataFrame(rows)
@@ -517,27 +547,27 @@ summary_df = calculate_summary(projects_df, tasks_df, issues_df, change_orders_d
 
 
 # -----------------------------
-# 상단 요약
+# 상단 요약 메트릭
 # -----------------------------
-overall_progress = int(pd.to_numeric(project_tasks["progress"], errors="coerce").fillna(0).mean()) if not project_tasks.empty else 0
-in_progress_count = len(project_tasks[project_tasks["status"] == "진행중"]) if not project_tasks.empty else 0
-done_count = len(project_tasks[project_tasks["status"] == "완료"]) if not project_tasks.empty else 0
-open_issues_count = len(project_issues[project_issues["status"].isin(["접수", "처리중"])]) if not project_issues.empty else 0
-pending_change_count = len(project_changes[project_changes["approval_status"] == "대기"]) if not project_changes.empty else 0
+overall_progress     = int(pd.to_numeric(project_tasks["progress"], errors="coerce").fillna(0).mean()) if not project_tasks.empty else 0
+in_progress_count    = len(project_tasks[project_tasks["status"] == "진행중"]) if not project_tasks.empty else 0
+done_count           = len(project_tasks[project_tasks["status"] == "완료"])   if not project_tasks.empty else 0
+open_issues_count    = len(project_issues[project_issues["status"].isin(["접수", "처리중"])]) if not project_issues.empty else 0
+pending_change_count = len(project_changes[project_changes["approval_status"] == "대기"])    if not project_changes.empty else 0
 
 if not project_tasks.empty:
-    end_dates = pd.to_datetime(project_tasks["planned_end"], errors="coerce")
-    max_end = end_dates.max()
+    end_dates      = pd.to_datetime(project_tasks["planned_end"], errors="coerce")
+    max_end        = end_dates.max()
     remaining_days = (max_end.date() - datetime.now().date()).days if pd.notna(max_end) else 0
 else:
     remaining_days = 0
 
 col1, col2, col3, col4, col5 = st.columns(5)
 col1.metric("선택 현장 진행률", f"{overall_progress}%")
-col2.metric("진행중 공정", f"{in_progress_count}개")
-col3.metric("완료 공정", f"{done_count}개")
-col4.metric("미처리 이슈", f"{open_issues_count}건")
-col5.metric("미승인 추가공사", f"{pending_change_count}건")
+col2.metric("진행중 공정",      f"{in_progress_count}개")
+col3.metric("완료 공정",        f"{done_count}개")
+col4.metric("미처리 이슈",      f"{open_issues_count}건")
+col5.metric("미승인 추가공사",  f"{pending_change_count}건")
 
 st.info(
     f"현재 현장: {project_name} / 주소: {site_address} / 고객: {client_name} / "
@@ -561,61 +591,74 @@ tab0, tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
 )
 
 
-# -----------------------------
-# 탭0: 전체 현장
-# -----------------------------
+# ================================================================
+# 탭0: 전체 현장 요약 + 기본정보 수정
+# st.form 제거 → money_input on_change가 탭 시 즉시 실행
+# ================================================================
 with tab0:
     st.subheader("전체 현장 요약")
-    summary_display_df = format_money_columns(
+    st.dataframe(
         summary_df,
-        ["총공사대금", "총 공사대금", "계약금", "1차지급", "1차 지급", "2차지급", "2차 지급", "3차지급", "3차 지급", "잔금", "승인추가금액", "승인 추가금액"],
+        use_container_width=True,
+        hide_index=True,
+        column_config=MONEY_COL_CONFIG,
     )
-    st.dataframe(summary_display_df, use_container_width=True, hide_index=True)
 
     if not summary_df.empty:
-        fig_all = px.bar(summary_df, x="프로젝트명", y="진행률", color="상태", text="진행률", hover_data=["PM", "미처리이슈", "미승인추가공사"])
+        fig_all = px.bar(
+            summary_df, x="프로젝트명", y="진행률", color="상태",
+            text="진행률", hover_data=["PM", "미처리이슈", "미승인추가공사"],
+        )
         fig_all.update_layout(height=420)
         st.plotly_chart(fig_all, use_container_width=True)
 
     st.subheader("선택 현장 기본정보 수정")
-    with st.form("edit_project_form"):
-        edit_name = st.text_input("프로젝트명", project_name)
-        edit_address = st.text_input("현장주소", site_address)
-        edit_client = st.text_input("고객명", client_name)
-        edit_amount = currency_input("총 공사대금", contract_amount, key="edit_amount")
-        edit_deposit = currency_input("계약금", deposit_amount, key="edit_deposit")
-        edit_first = currency_input("1차 지급", first_payment, key="edit_first")
-        edit_second = currency_input("2차 지급", second_payment, key="edit_second")
-        edit_third = currency_input("3차 지급", third_payment, key="edit_third")
-        edit_balance = currency_input("잔금", balance_amount, key="edit_balance")
-        st.caption(f"지급단계 합계: {format_currency(edit_deposit + edit_first + edit_second + edit_third + edit_balance)}")
-        edit_start = st.date_input("공사시작일", start_date)
-        edit_duration = st.number_input("예상공사기간", min_value=1, value=expected_duration, step=1)
-        edit_status = st.selectbox("상태", ["준비중", "진행중", "보류", "완료", "취소"], index=["준비중", "진행중", "보류", "완료", "취소"].index(str(selected_project.get("status", "진행중"))) if str(selected_project.get("status", "진행중")) in ["준비중", "진행중", "보류", "완료", "취소"] else 1)
-        edit_pm = st.text_input("PM", str(selected_project.get("pm", "")))
-        edit_memo = st.text_area("메모", str(selected_project.get("memo", "")))
-        save_project = st.form_submit_button("💾 선택 현장 기본정보 저장")
+    with st.container():
+        edit_name    = st.text_input("프로젝트명", value=project_name, key="edit_proj_name")
+        edit_address = st.text_input("현장주소",   value=site_address, key="edit_proj_address")
+        edit_client  = st.text_input("고객명",     value=client_name,  key="edit_proj_client")
 
-        if save_project:
+        edit_amount  = money_input("총 공사대금", key="edit_amount",  default_value=contract_amount)
+        edit_deposit = money_input("계약금",      key="edit_deposit", default_value=deposit_amount)
+        edit_first   = money_input("1차 지급",    key="edit_first",   default_value=first_payment)
+        edit_second  = money_input("2차 지급",    key="edit_second",  default_value=second_payment)
+        edit_third   = money_input("3차 지급",    key="edit_third",   default_value=third_payment)
+        edit_balance = money_input("잔금",        key="edit_balance", default_value=balance_amount)
+
+        st.caption(f"지급단계 합계: {format_currency(edit_deposit + edit_first + edit_second + edit_third + edit_balance)}")
+
+        edit_start    = st.date_input("공사시작일", start_date, key="edit_start")
+        edit_duration = st.number_input("예상공사기간", min_value=1, value=expected_duration, step=1, key="edit_duration")
+        status_opts   = ["준비중", "진행중", "보류", "완료", "취소"]
+        cur_status    = str(selected_project.get("status", "진행중"))
+        edit_status   = st.selectbox(
+            "상태", status_opts,
+            index=status_opts.index(cur_status) if cur_status in status_opts else 1,
+            key="edit_status",
+        )
+        edit_pm   = st.text_input("PM",  value=str(selected_project.get("pm", "")),   key="edit_pm")
+        edit_memo = st.text_area("메모", value=str(selected_project.get("memo", "")), key="edit_memo")
+
+        if st.button("💾 선택 현장 기본정보 저장", key="btn_save_project"):
             try:
                 sb_update(
                     "projects",
                     selected_project_id,
                     {
-                        "name": edit_name,
-                        "address": edit_address,
-                        "client_name": edit_client,
-                        "contract_amount": int(edit_amount),
-                        "deposit_amount": int(edit_deposit),
-                        "first_payment": int(edit_first),
-                        "second_payment": int(edit_second),
-                        "third_payment": int(edit_third),
-                        "balance_amount": int(edit_balance),
-                        "start_date": str(edit_start),
-                        "duration_days": int(edit_duration),
-                        "status": edit_status,
-                        "pm": edit_pm,
-                        "memo": edit_memo,
+                        "name":            st.session_state.get("edit_proj_name", ""),
+                        "address":         st.session_state.get("edit_proj_address", ""),
+                        "client_name":     st.session_state.get("edit_proj_client", ""),
+                        "contract_amount": edit_amount,
+                        "deposit_amount":  edit_deposit,
+                        "first_payment":   edit_first,
+                        "second_payment":  edit_second,
+                        "third_payment":   edit_third,
+                        "balance_amount":  edit_balance,
+                        "start_date":      str(edit_start),
+                        "duration_days":   int(edit_duration),
+                        "status":          edit_status,
+                        "pm":              st.session_state.get("edit_pm", ""),
+                        "memo":            st.session_state.get("edit_memo", ""),
                     },
                 )
                 st.success("현장 기본정보가 저장되었습니다.")
@@ -639,9 +682,7 @@ with tab1:
         display_project_tasks = display_tasks(project_tasks)
         fig = px.bar(
             display_project_tasks,
-            x="공정",
-            y="진행률",
-            color="진행상태",
+            x="공정", y="진행률", color="진행상태",
             color_discrete_map={"완료": "#2ecc71", "진행중": "#f1c40f", "대기": "#95a5a6", "보류": "#e74c3c"},
             text="진행률",
             hover_data=["담당자", "시작예정", "완료예정", "다음액션"],
@@ -658,7 +699,10 @@ with tab1:
         if check_df.empty:
             st.success("현재 특별히 확인할 항목이 없습니다.")
         else:
-            st.dataframe(check_df[["공정", "진행상태", "진행률", "담당자", "고객승인상태", "지연사유", "다음액션"]], use_container_width=True, hide_index=True)
+            st.dataframe(
+                check_df[["공정", "진행상태", "진행률", "담당자", "고객승인상태", "지연사유", "다음액션"]],
+                use_container_width=True, hide_index=True,
+            )
 
 
 # -----------------------------
@@ -682,15 +726,19 @@ with tab2:
                     row_id = int(row["id"])
                     with st.expander(f"{row['process']} / {row.get('manager','')} / {row.get('progress',0)}%"):
                         new_progress = st.slider("진행률", 0, 100, to_int(row.get("progress", 0)), key=f"prog_{row_id}")
-                        new_status = st.selectbox("상태", status_order, index=status_order.index(row.get("status", "대기")) if row.get("status", "대기") in status_order else 0, key=f"stat_{row_id}")
-                        next_action = st.text_input("다음 액션", str(row.get("next_action", "")), key=f"next_{row_id}")
-                        delay_reason = st.text_area("지연사유", str(row.get("delay_reason", "")), key=f"delay_{row_id}")
+                        new_status   = st.selectbox(
+                            "상태", status_order,
+                            index=status_order.index(row.get("status", "대기")) if row.get("status", "대기") in status_order else 0,
+                            key=f"stat_{row_id}",
+                        )
+                        next_action  = st.text_input("다음 액션", str(row.get("next_action", "")), key=f"next_{row_id}")
+                        delay_reason = st.text_area("지연사유",   str(row.get("delay_reason", "")), key=f"delay_{row_id}")
 
                         if st.button("저장", key=f"save_task_{row_id}"):
                             values = {
-                                "progress": int(new_progress),
-                                "status": new_status,
-                                "next_action": next_action,
+                                "progress":     int(new_progress),
+                                "status":       new_status,
+                                "next_action":  next_action,
                                 "delay_reason": delay_reason,
                             }
                             if new_status == "완료" and not row.get("actual_end"):
@@ -703,7 +751,11 @@ with tab2:
     st.subheader("선택 현장 공정표 직접 수정")
     if not project_tasks.empty:
         edit_df = display_tasks(project_tasks).copy()
-        editable_cols = ["ID", "공정", "진행상태", "담당자", "진행률", "시작예정", "완료예정", "실제시작일", "실제완료일", "자재상태", "고객승인필요", "고객승인상태", "지연사유", "다음액션", "메모"]
+        editable_cols = [
+            "ID", "공정", "진행상태", "담당자", "진행률", "시작예정", "완료예정",
+            "실제시작일", "실제완료일", "자재상태", "고객승인필요", "고객승인상태",
+            "지연사유", "다음액션", "메모",
+        ]
         edit_df = edit_df[editable_cols]
         edited_tasks = st.data_editor(
             edit_df,
@@ -711,8 +763,8 @@ with tab2:
             num_rows="fixed",
             hide_index=True,
             column_config={
-                "진행상태": st.column_config.SelectboxColumn("진행상태", options=["대기", "진행중", "완료", "보류"]),
-                "자재상태": st.column_config.SelectboxColumn("자재상태", options=["미확인", "발주전", "발주완료", "입고완료", "문제발생"]),
+                "진행상태":     st.column_config.SelectboxColumn("진행상태",     options=["대기", "진행중", "완료", "보류"]),
+                "자재상태":     st.column_config.SelectboxColumn("자재상태",     options=["미확인", "발주전", "발주완료", "입고완료", "문제발생"]),
                 "고객승인필요": st.column_config.SelectboxColumn("고객승인필요", options=["예", "아니오"]),
                 "고객승인상태": st.column_config.SelectboxColumn("고객승인상태", options=["해당없음", "대기", "승인", "거절", "보류"]),
             },
@@ -743,14 +795,17 @@ with tab3:
         if timeline_df.empty:
             st.warning("시작예정/완료예정 날짜를 확인해 주세요.")
         else:
-            fig_timeline = px.timeline(timeline_df, x_start="시작예정", x_end="완료예정", y="공정", color="진행상태", hover_data=["담당자", "진행률", "다음액션"])
+            fig_timeline = px.timeline(
+                timeline_df, x_start="시작예정", x_end="완료예정", y="공정",
+                color="진행상태", hover_data=["담당자", "진행률", "다음액션"],
+            )
             fig_timeline.update_yaxes(autorange="reversed")
             fig_timeline.update_layout(height=520)
             st.plotly_chart(fig_timeline, use_container_width=True)
 
 
 # -----------------------------
-# 탭4: 이슈 관리
+# 탭4: 이슈 관리 (금액 없음 → st.form 유지)
 # -----------------------------
 with tab4:
     st.subheader("이슈 등록")
@@ -758,31 +813,31 @@ with tab4:
 
     with st.form("issue_form", clear_on_submit=True):
         c1, c2, c3 = st.columns(3)
-        issue_process = c1.selectbox("공정", process_options)
-        issue_type = c2.selectbox("이슈유형", ["일정지연", "자재문제", "하자", "고객요청", "작업자문제", "안전", "기타"])
-        issue_level = c3.selectbox("중요도", ["낮음", "보통", "높음", "긴급"])
+        issue_process = c1.selectbox("공정",     process_options)
+        issue_type    = c2.selectbox("이슈유형", ["일정지연", "자재문제", "하자", "고객요청", "작업자문제", "안전", "기타"])
+        issue_level   = c3.selectbox("중요도",   ["낮음", "보통", "높음", "긴급"])
         issue_content = st.text_area("내용")
         c4, c5, c6 = st.columns(3)
         issue_manager = c4.text_input("담당자")
-        issue_status = c5.selectbox("상태", ["접수", "처리중", "완료", "보류"])
-        issue_due = c6.date_input("처리기한", datetime.now().date() + timedelta(days=3))
-        issue_result = st.text_area("처리내용")
+        issue_status  = c5.selectbox("상태", ["접수", "처리중", "완료", "보류"])
+        issue_due     = c6.date_input("처리기한", datetime.now().date() + timedelta(days=3))
+        issue_result  = st.text_area("처리내용")
 
         if st.form_submit_button("이슈 저장"):
             try:
                 sb_insert(
                     "issues",
                     {
-                        "project_id": selected_project_id,
-                        "process": issue_process,
-                        "issue_type": issue_type,
-                        "priority": issue_level,
-                        "content": issue_content,
-                        "manager": issue_manager,
-                        "status": issue_status,
+                        "project_id":      selected_project_id,
+                        "process":         issue_process,
+                        "issue_type":      issue_type,
+                        "priority":        issue_level,
+                        "content":         issue_content,
+                        "manager":         issue_manager,
+                        "status":          issue_status,
                         "registered_date": str(datetime.now().date()),
-                        "due_date": str(issue_due),
-                        "result": issue_result,
+                        "due_date":        str(issue_due),
+                        "result":          issue_result,
                     },
                 )
                 st.success("이슈가 Supabase에 저장되었습니다.")
@@ -795,45 +850,51 @@ with tab4:
     st.dataframe(display_issues(project_issues), use_container_width=True, hide_index=True)
 
 
-# -----------------------------
+# ================================================================
 # 탭5: 추가공사 관리
-# -----------------------------
+# 추가금액 → money_input 사용, st.form 제거
+# ================================================================
 with tab5:
     st.subheader("추가공사/변경 요청 등록")
     st.caption("분쟁 예방을 위해 변경내용, 추가금액, 승인방식, 승인일을 반드시 남기는 것을 권장합니다.")
     process_options = list(project_tasks["process"].unique()) if not project_tasks.empty else ["공통"]
 
-    with st.form("change_order_form", clear_on_submit=True):
-        c1, c2, c3 = st.columns(3)
-        co_process = c1.selectbox("공정", process_options, key="co_process")
-        requester = c2.selectbox("요청자", ["고객", "시공자", "협력업체", "기타"])
-        amount = c3.number_input("추가금액", min_value=0, value=0, step=100000, format="%d")
-        change_content = st.text_area("변경내용")
-        c4, c5, c6 = st.columns(3)
-        approval_status = c4.selectbox("승인상태", ["대기", "승인", "거절", "보류"])
-        approval_method = c5.selectbox("승인방식", ["미정", "구두", "카카오톡", "문자", "이메일", "서명", "계약서/견적서"])
-        request_date = c6.date_input("요청일", datetime.now().date())
-        approval_date = st.date_input("승인일", datetime.now().date())
-        co_memo = st.text_area("메모")
+    with st.container():
+        c1, c2 = st.columns(2)
+        co_process = c1.selectbox("공정",   process_options, key="co_process")
+        requester  = c2.selectbox("요청자", ["고객", "시공자", "협력업체", "기타"], key="co_requester")
 
-        if st.form_submit_button("추가공사 저장"):
+        co_amount = money_input("추가금액", key="co_amount", default_value=0)
+
+        change_content  = st.text_area("변경내용", key="co_content")
+        c3, c4, c5 = st.columns(3)
+        approval_status = c3.selectbox("승인상태", ["대기", "승인", "거절", "보류"], key="co_apv_status")
+        approval_method = c4.selectbox("승인방식", ["미정", "구두", "카카오톡", "문자", "이메일", "서명", "계약서/견적서"], key="co_apv_method")
+        request_date    = c5.date_input("요청일", datetime.now().date(), key="co_req_date")
+        approval_date   = st.date_input("승인일", datetime.now().date(), key="co_apv_date")
+        co_memo         = st.text_area("메모", key="co_memo")
+
+        if st.button("추가공사 저장", key="btn_save_co"):
             try:
                 sb_insert(
                     "change_orders",
                     {
-                        "project_id": selected_project_id,
-                        "process": co_process,
-                        "requester": requester,
-                        "content": change_content,
-                        "amount": int(amount),
-                        "approval_status": approval_status,
-                        "approval_method": approval_method,
-                        "request_date": str(request_date),
-                        "approval_date": str(approval_date) if approval_status == "승인" else None,
-                        "memo": co_memo,
+                        "project_id":      selected_project_id,
+                        "process":         st.session_state.get("co_process", ""),
+                        "requester":       st.session_state.get("co_requester", ""),
+                        "content":         st.session_state.get("co_content", ""),
+                        "amount":          co_amount,
+                        "approval_status": st.session_state.get("co_apv_status", "대기"),
+                        "approval_method": st.session_state.get("co_apv_method", "미정"),
+                        "request_date":    str(request_date),
+                        "approval_date":   str(approval_date) if st.session_state.get("co_apv_status") == "승인" else None,
+                        "memo":            st.session_state.get("co_memo", ""),
                     },
                 )
                 st.success("추가공사 기록이 Supabase에 저장되었습니다.")
+                for k in ["co_content", "co_memo", "co_amount"]:
+                    if k in st.session_state:
+                        del st.session_state[k]
                 st.rerun()
             except Exception as e:
                 st.error(f"추가공사 저장 실패: {e}")
@@ -841,9 +902,18 @@ with tab5:
     st.divider()
     st.subheader("선택 현장 추가공사 목록")
     if not project_changes.empty:
-        total_approved = pd.to_numeric(project_changes.loc[project_changes["approval_status"] == "승인", "amount"], errors="coerce").fillna(0).sum()
+        total_approved = pd.to_numeric(
+            project_changes.loc[project_changes["approval_status"] == "승인", "amount"],
+            errors="coerce",
+        ).fillna(0).sum()
         st.metric("승인된 추가공사 합계", format_currency(total_approved))
-    st.dataframe(display_changes(project_changes), use_container_width=True, hide_index=True)
+
+    st.dataframe(
+        display_changes(project_changes),
+        use_container_width=True,
+        hide_index=True,
+        column_config={"추가금액": st.column_config.NumberColumn("추가금액", format="%,d원")},
+    )
 
 
 # -----------------------------
@@ -855,8 +925,8 @@ with tab6:
     process_options = list(project_tasks["process"].unique()) if not project_tasks.empty else ["공통"]
 
     c1, c2, c3 = st.columns(3)
-    photo_process = c1.selectbox("공정", process_options, key="photo_process")
-    photo_type = c2.selectbox("사진구분", ["작업 전", "작업 중", "작업 후", "하자", "자재", "고객요청", "기타"])
+    photo_process     = c1.selectbox("공정",     process_options, key="photo_process")
+    photo_type        = c2.selectbox("사진구분", ["작업 전", "작업 중", "작업 후", "하자", "자재", "고객요청", "기타"])
     photo_description = c3.text_input("사진 설명")
 
     uploaded_files = st.file_uploader("사진 업로드 JPG/PNG/JPEG", type=["jpg", "png", "jpeg"], accept_multiple_files=True)
@@ -864,25 +934,23 @@ with tab6:
     if uploaded_files and st.button("📸 사진 저장"):
         try:
             for uploaded_file in uploaded_files:
-                ext = os.path.splitext(uploaded_file.name)[1].lower()
+                ext         = os.path.splitext(uploaded_file.name)[1].lower()
                 unique_name = f"project_{selected_project_id}/{datetime.now().strftime('%Y%m%d')}/{uuid.uuid4().hex}{ext}"
-                file_bytes = uploaded_file.getvalue()
+                file_bytes  = uploaded_file.getvalue()
 
                 supabase.storage.from_(BUCKET).upload(
-                    unique_name,
-                    file_bytes,
+                    unique_name, file_bytes,
                     {"content-type": uploaded_file.type, "upsert": "true"},
                 )
-
                 sb_insert(
                     "photos",
                     {
-                        "project_id": selected_project_id,
-                        "process": photo_process,
-                        "photo_type": photo_type,
-                        "file_name": uploaded_file.name,
+                        "project_id":   selected_project_id,
+                        "process":      photo_process,
+                        "photo_type":   photo_type,
+                        "file_name":    uploaded_file.name,
                         "storage_path": unique_name,
-                        "description": photo_description,
+                        "description":  photo_description,
                     },
                 )
             st.success("사진이 Supabase Storage에 저장되었습니다.")
@@ -898,13 +966,17 @@ with tab6:
     if project_photos.empty:
         st.info("아직 저장된 사진이 없습니다.")
     else:
-        photo_cols = st.columns(3)
+        photo_cols    = st.columns(3)
         recent_photos = project_photos.tail(12).iloc[::-1]
         for idx, (_, row) in enumerate(recent_photos.iterrows()):
             with photo_cols[idx % 3]:
                 try:
                     public_url = supabase.storage.from_(BUCKET).get_public_url(row["storage_path"])
-                    st.image(public_url, caption=f"{row.get('process', '')} / {row.get('photo_type', '')} / {row.get('description', '')}", use_container_width=True)
+                    st.image(
+                        public_url,
+                        caption=f"{row.get('process','')} / {row.get('photo_type','')} / {row.get('description','')}",
+                        use_container_width=True,
+                    )
                 except Exception:
                     st.warning("사진 URL을 불러오지 못했습니다.")
 
@@ -916,18 +988,18 @@ with tab7:
     st.subheader("전체 데이터 다운로드")
 
     projects_display = display_projects(projects_df)
-    tasks_display = display_tasks(tasks_df)
-    issues_display = display_issues(issues_df)
-    changes_display = display_changes(change_orders_df)
-    photos_display = display_photos(photos_df)
+    tasks_display    = display_tasks(tasks_df)
+    issues_display   = display_issues(issues_df)
+    changes_display  = display_changes(change_orders_df)
+    photos_display   = display_photos(photos_df)
 
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         projects_display.to_excel(writer, index=False, sheet_name="현장목록")
-        tasks_display.to_excel(writer, index=False, sheet_name="공정현황")
-        issues_display.to_excel(writer, index=False, sheet_name="이슈관리")
-        changes_display.to_excel(writer, index=False, sheet_name="추가공사")
-        photos_display.to_excel(writer, index=False, sheet_name="사진기록")
+        tasks_display.to_excel(writer,    index=False, sheet_name="공정현황")
+        issues_display.to_excel(writer,   index=False, sheet_name="이슈관리")
+        changes_display.to_excel(writer,  index=False, sheet_name="추가공사")
+        photos_display.to_excel(writer,   index=False, sheet_name="사진기록")
     output.seek(0)
 
     st.download_button(
