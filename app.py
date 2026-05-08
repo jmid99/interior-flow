@@ -601,8 +601,11 @@ with tab0:
     payment_sum = edit_deposit + edit_first + edit_second + edit_third + edit_balance
     st.caption(f"지급단계 합계: {format_currency(payment_sum)}")
     if payment_sum != edit_amount:
-        diff = edit_amount - payment_sum
-        st.warning(f"총 공사대금과 지급단계 합계가 다릅니다. 차액: {format_currency(diff)}")
+        diff = payment_sum - edit_amount
+        if diff > 0:
+            st.warning(f"총 공사대금 대비 {format_currency(diff)} 초과 지급되었습니다.")
+        else:
+            st.warning(f"아직 {format_currency(abs(diff))} 미수금이 남아 있습니다.")
     else:
         st.success("총 공사대금과 지급단계 합계가 일치합니다.")
 
